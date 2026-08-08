@@ -2,13 +2,24 @@
   "version": 4,
   "configurations": [
     {
-      "name": "windows-gcc-x64",
-      "compilerPath": "gcc",
-      "cStandard": "${default}",
-      "cppStandard": "${default}",
-      "intelliSenseMode": "windows-gcc-x64",
+      "name": "MSVC-x64",
+      "compilerPath": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\cl.exe",
+      "cStandard": "c17",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "windows-msvc-x64",
       "includePath": [
-        "${workspaceFolder}/**"
+        "${workspaceFolder}",
+        "${workspaceFolder}/build/vscode",
+        "C:/Qt/6.8.3/msvc2022_64/include",
+        "C:/Qt/6.8.3/msvc2022_64/include/QtCore",
+        "C:/Qt/6.8.3/msvc2022_64/include/QtGui",
+        "C:/Qt/6.8.3/msvc2022_64/include/QtWidgets",
+        "C:/Qt/6.8.3/msvc2022_64/include/QtOpenGL",
+        "C:/Qt/6.8.3/msvc2022_64/include/QtOpenGLWidgets",
+        "C:/Qt/6.8.3/msvc2022_64/include/QtNetwork",
+        "C:/CUDA/v13.3/include",
+        "C:/CUDA/v13.3/common/inc",
+        "C:/Program Files (x86)/VTK/include/vtk-9.6"
       ],
       "defines": [
         "UNICODE",

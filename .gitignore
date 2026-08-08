@@ -22,3 +22,6 @@ ui_*.h
 # Qt Creator local settings
 *.pro.user
 .qtc_clangd/
+
+# Editor-generated compile database (machine-specific paths)
+compile_commands.json
