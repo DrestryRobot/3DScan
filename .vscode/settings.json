@@ -5,7 +5,18 @@
   "C_Cpp_Runner.cStandard": "",
   "C_Cpp_Runner.cppStandard": "",
   "C_Cpp_Runner.msvcBatchPath": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvarsall.bat",
-  "C_Cpp_Runner.useMsvc": false,
+  "C_Cpp_Runner.useMsvc": true,
+  "C_Cpp_Runner.includePaths": [
+    "C:/Qt/6.8.3/msvc2022_64/include",
+    "C:/Qt/6.8.3/msvc2022_64/include/QtCore",
+    "C:/Qt/6.8.3/msvc2022_64/include/QtGui",
+    "C:/Qt/6.8.3/msvc2022_64/include/QtWidgets",
+    "C:/Qt/6.8.3/msvc2022_64/include/QtOpenGL",
+    "C:/Qt/6.8.3/msvc2022_64/include/QtOpenGLWidgets",
+    "C:/Qt/6.8.3/msvc2022_64/include/QtNetwork",
+    "C:/CUDA/v13.3/include",
+    "C:/Program Files (x86)/VTK/include/vtk-9.6"
+  ],
   "C_Cpp_Runner.warnings": [
     "-Wall",
     "-Wextra",
