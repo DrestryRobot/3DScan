@@ -3,6 +3,7 @@ QT       += core gui widgets opengl openglwidgets network
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
 CONFIG += c++17
+CONFIG += force_debug_info
 
 
 # # ============ OpenGL 头文件路径 ============
@@ -34,8 +35,8 @@ LIBS +=-LC:\CUDA\v13.3/lib/x64 \
 OTHER_FILES +=./algorithm.cu
 # Cuda sources
 CUDA_SOURCES+=./algorithm.cu
-CUDA_SDK ="C:\CUDA\v13.3"
-CUDA_DIR ="C:\CUDA\v13.3"
+CUDA_SDK = C:\CUDA\v13.3
+CUDA_DIR = C:\CUDA\v13.3
 QMAKE_LIBDIR += $$CUDA_DIR/lib/x64
 SYSTEM_TYPE = 64
 #不同的显卡注意填适当的选项""
@@ -53,22 +54,23 @@ CUDA_INC = $$join("C:\CUDA\v13.3/include",'" -I"','-I"','"')
 MSVCRT_LINK_FLAG_DEBUG = "/MDd"
 MSVCRT_LINK_FLAG_RELEASE = "/MD"
 
-CUDA_OBJECTS_DIR = ./
 # 配置编译器
 CONFIG(debug, debug|release) {
+CUDA_OBJECTS_DIR = ./debug
 # Debug mode
 cuda_d.input = CUDA_SOURCES
 cuda_d.output = $$CUDA_OBJECTS_DIR/${QMAKE_FILE_BASE}algorithm.obj
-cuda_d.commands = $$CUDA_DIR/bin/nvcc.exe -D_DEBUG $$NVCC_OPTIONS $$CUDA_INC $$CUDA_LIBS --machine $$SYSTEM_TYPE \
+cuda_d.commands = \"$$CUDA_DIR/bin/nvcc.exe\" -D_DEBUG $$NVCC_OPTIONS $$CUDA_INC $$CUDA_LIBS --machine $$SYSTEM_TYPE \
                  -arch=$$CUDA_ARCH -c -o ${QMAKE_FILE_OUT} ${QMAKE_FILE_NAME} -Xcompiler $$MSVCRT_LINK_FLAG_DEBUG
 cuda_d.dependency_type = TYPE_C
 QMAKE_EXTRA_COMPILERS += cuda_d
 }
 else {
+CUDA_OBJECTS_DIR = ./release
 # Release mode
  cuda.input = CUDA_SOURCES
  cuda.output = $$CUDA_OBJECTS_DIR/${QMAKE_FILE_BASE}algorithm.obj
- cuda.commands = $$CUDA_DIR/bin/nvcc.exe $$NVCC_OPTIONS $$CUDA_INC $$CUDA_LIBS --machine $$SYSTEM_TYPE \
+ cuda.commands = \"$$CUDA_DIR/bin/nvcc.exe\" $$NVCC_OPTIONS $$CUDA_INC $$CUDA_LIBS --machine $$SYSTEM_TYPE \
     -arch=$$CUDA_ARCH -c -o ${QMAKE_FILE_OUT} ${QMAKE_FILE_NAME} -Xcompiler $$MSVCRT_LINK_FLAG_RELEASE
 cuda.dependency_type = TYPE_C
  QMAKE_EXTRA_COMPILERS += cuda
@@ -90,6 +92,7 @@ LIBS += -lvtkGUISupportQt-9.6 \
         -lvtkInteractionStyle-9.6 \
         -lvtkInteractionWidgets-9.6 \
         -lvtkCommonCore-9.6 \
+        -lvtkCommonMath-9.6 \
         -lvtkCommonDataModel-9.6 \
         -lvtkCommonExecutionModel-9.6 \
         -lvtkCommonTransforms-9.6 \

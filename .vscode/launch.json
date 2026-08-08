@@ -2,6 +2,23 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Debug 3DScan",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}\\build\\vscode\\release\\simulation.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "PATH",
+          "value": "C:\\Qt\\6.8.3\\msvc2022_64\\bin;C:\\Program Files (x86)\\VTK\\bin;C:\\CUDA\\v13.3\\bin;C:\\Windows\\System32;C:\\Windows"
+        }
+      ],
+      "console": "internalConsole",
+      "preLaunchTask": "build"
+    },
+    {
       "name": "C/C++ Runner: Debug Session",
       "type": "cppdbg",
       "request": "launch",
@@ -9,7 +26,7 @@
       "stopAtEntry": false,
       "externalConsole": true,
       "cwd": "c:/3DScan",
-      "program": "c:/3DScan/build/Debug/outDebug",
+      "program": "c:/3DScan/build/Release/outRelease",
       "MIMode": "gdb",
       "miDebuggerPath": "gdb",
       "setupCommands": [

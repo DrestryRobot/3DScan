@@ -1,0 +1,29 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.vscode\\build.bat",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$msCompile"],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "build-debug",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.vscode\\build-debug.bat",
+      "group": "build",
+      "problemMatcher": ["$msCompile"],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "run",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.vscode\\run.bat",
+      "group": "test",
+      "dependsOn": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    }
+  ]
+}

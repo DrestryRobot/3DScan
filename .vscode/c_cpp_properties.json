@@ -1,18 +1,31 @@
 {
+  "version": 4,
   "configurations": [
     {
       "name": "windows-gcc-x64",
-      "includePath": [
-        "${workspaceFolder}/**"
-      ],
       "compilerPath": "gcc",
       "cStandard": "${default}",
       "cppStandard": "${default}",
       "intelliSenseMode": "windows-gcc-x64",
-      "compilerArgs": [
-        ""
-      ]
+      "includePath": [
+        "${workspaceFolder}/**"
+      ],
+      "defines": [
+        "UNICODE",
+        "_UNICODE",
+        "WIN32",
+        "WIN64",
+        "_ENABLE_EXTENDED_ALIGNED_STORAGE",
+        "NDEBUG",
+        "QT_NO_DEBUG",
+        "QT_OPENGLWIDGETS_LIB",
+        "QT_WIDGETS_LIB",
+        "QT_OPENGL_LIB",
+        "QT_GUI_LIB",
+        "QT_NETWORK_LIB",
+        "QT_CORE_LIB"
+      ],
+      "windowsSdkVersion": "10.0.26100.0"
     }
-  ],
-  "version": 4
+  ]
 }
