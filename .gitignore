@@ -1,0 +1,24 @@
+# Build output
+build/
+release/
+debug/
+Makefile
+Makefile.Debug
+Makefile.Release
+.qmake.stash
+
+# Compiled / generated files
+*.obj
+*.o
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+
+# Qt Creator local settings
+*.pro.user
+.qtc_clangd/
