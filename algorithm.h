@@ -27,9 +27,32 @@ int processDirectVBO(CUDAProcessorHandle processor,
                      const double* pose,
                      const double* amp,
                      const double* tof,
-                     double si,
+                     const double* localZ,
                      int beam,
-                     int isAmpMode);
+                     int isAmpMode,
+                     int startValid);
+
+// 方案2：直接写入预计算的世界坐标点（均匀网格）
+int processDirectCloudVBO(CUDAProcessorHandle processor,
+                          const float* worldXYZ,
+                          const double* amp,
+                          const double* tof,
+                          int count,
+                          int isAmpMode,
+                          int startValid);
+
+// Reset accumulated VBO point cloud
+int resetVBO(CUDAProcessorHandle processor);
+
+// Set the 256-entry color LUT used by the kernel
+int setColorLUT(CUDAProcessorHandle processor,
+                const unsigned int* lut,
+                int size);
+
+// Re-color the accumulated point cloud in the VBO (AMP or TOF mode)
+int recolorVBO(CUDAProcessorHandle processor,
+               const float* values,
+               int count);
 
 // 检查 CUDA 可用性
 int isCUDAAvailable(void);

@@ -26,6 +26,8 @@ public:
     }
 
     void Render(vtkRenderer* renderer, vtkMapper* mapper) override;
+    void SetCloudBounds(double xmin, double xmax, double ymin, double ymax, double zmin, double zmax);
+    double* GetBounds() override;
     int RenderOpaqueGeometry(vtkViewport* viewport) override;
 
 protected:
@@ -34,6 +36,8 @@ protected:
 
 private:
     CUDAProcessorHandle cudaHandle = nullptr;
+    double cloudBounds[6] = {0, 0, 0, 0, 0, 0};
+    bool cloudBoundsSet = false;
     bool vboInitialized = false;
     int validPointCount = 0;
 

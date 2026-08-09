@@ -1,6 +1,8 @@
 #include "mainwindow7.h"
-#include "cuda_runtime_api.h"
 #include "ui_mainwindow7.h"
+#include <QFile>
+#include <QTextStream>
+#include <vtkCullerCollection.h>
 
 // 全局变量声明
 extern double amp[64];
@@ -13,8 +15,43 @@ extern quint32 robot_ipoc;
 extern double longmen[2];
 extern bool m_start;
 
-// 最大点数限制
-static vtkIdType currentIndex = 0;
+// 曲面分块大小：已完成的块不再重传，避免网格越大越卡
+static const vtkIdType kChunkMaxCells = 100000;
+
+static const uint32_t color_Amplitude[] = {
+        0xffffffff, 0xfffafcfe, 0xfff6fafd, 0xfff2f7fd, 0xffeef5fc, 0xffeaf2fb, 0xffe6f0fb, 0xffe1edfa,
+        0xffddebf9, 0xffd9e8f9, 0xffd5e6f8, 0xffd1e3f7, 0xffcde1f7, 0xffc8def6, 0xffc4dcf6, 0xffc0d9f5,
+        0xffbcd7f4, 0xffb8d4f4, 0xffb4d2f3, 0xffafd0f2, 0xffabcdf2, 0xffa7cbf1, 0xffa3c8f0, 0xff9fc6f0,
+        0xff9bc3ef, 0xff96c1ef, 0xff92beee, 0xff8ebced, 0xff8ab9ed, 0xff86b7ec, 0xff82b4eb, 0xff7db2eb,
+        0xff79afea, 0xff75ade9, 0xff71aae9, 0xff6da8e8, 0xff69a6e8, 0xff66a1e5, 0xff639de2, 0xff6099df,
+        0xff5d95dc, 0xff5a91da, 0xff588dd7, 0xff5589d4, 0xff5285d1, 0xff4f81cf, 0xff4c7dcc, 0xff4979c9,
+        0xff4775c6, 0xff4471c3, 0xff416dc1, 0xff3e69be, 0xff3b65bb, 0xff3861b8, 0xff365db6, 0xff3359b3,
+        0xff3055b0, 0xff2d51ad, 0xff2a4daa, 0xff2749a8, 0xff2545a5, 0xff2241a2, 0xff1f3d9f, 0xff1c399d,
+        0xff19359a, 0xff163197, 0xff142d94, 0xff112991, 0xff0e258f, 0xff0b218c, 0xff081d89, 0xff051986,
+        0xff031584, 0xff041883, 0xff061c83, 0xff082083, 0xff0a2483, 0xff0c2883, 0xff0e2c83, 0xff103082,
+        0xff123482, 0xff143882, 0xff153c82, 0xff174082, 0xff194482, 0xff1b4881, 0xff1d4c81, 0xff1f5081,
+        0xff215481, 0xff235881, 0xff255c81, 0xff266080, 0xff286480, 0xff2a6880, 0xff2c6c80, 0xff2e7080,
+        0xff307480, 0xff32787f, 0xff347c7f, 0xff36807f, 0xff37847f, 0xff39887f, 0xff3b8c7f, 0xff3d907e,
+        0xff3f947e, 0xff41987e, 0xff439c7e, 0xff45a07e, 0xff47a47e, 0xff4ca67b, 0xff51a878, 0xff56aa75,
+        0xff5bac72, 0xff60ae6f, 0xff65b06c, 0xff6ab269, 0xff6fb467, 0xff74b764, 0xff79b961, 0xff7ebb5e,
+        0xff83bd5b, 0xff88bf58, 0xff8dc155, 0xff92c353, 0xff97c550, 0xff9cc74d, 0xffa1ca4a, 0xffa6cc47,
+        0xffabce44, 0xffb0d041, 0xffb5d23f, 0xffbad43c, 0xffbfd639, 0xffc4d836, 0xffc9da33, 0xffcedd30,
+        0xffd3df2d, 0xffd8e12b, 0xffdde328, 0xffe2e525, 0xffe7e722, 0xffece91f, 0xfff1eb1c, 0xfff6ed19,
+        0xfffcf017, 0xfffaec19, 0xfff9e91b, 0xfff8e61d, 0xfff7e31f, 0xfff6df22, 0xfff5dc24, 0xfff4d926,
+        0xfff2d628, 0xfff1d32b, 0xfff0cf2d, 0xffefcc2f, 0xffeec931, 0xffedc633, 0xffecc236, 0xffeabf38,
+        0xffe9bc3a, 0xffe8b93c, 0xffe7b63f, 0xffe6b241, 0xffe5af43, 0xffe4ac45, 0xffe2a947, 0xffe1a54a,
+        0xffe0a24c, 0xffdf9f4e, 0xffde9c50, 0xffdd9953, 0xffdc9555, 0xffda9257, 0xffd98f59, 0xffd88c5b,
+        0xffd7885e, 0xffd68560, 0xffd58262, 0xffd47f64, 0xffd37c67, 0xffd27b64, 0xffd27b62, 0xffd27b60,
+        0xffd27a5e, 0xffd17a5b, 0xffd17a59, 0xffd17957, 0xffd17955, 0xffd07953, 0xffd07850, 0xffd0784e,
+        0xffd0784c, 0xffcf774a, 0xffcf7747, 0xffcf7745, 0xffcf7643, 0xffce7641, 0xffce763f, 0xffce753c,
+        0xffce753a, 0xffcd7538, 0xffcd7436, 0xffcd7433, 0xffcd7431, 0xffcc732f, 0xffcc732d, 0xffcc732b,
+        0xffcc7228, 0xffcb7226, 0xffcb7224, 0xffcb7122, 0xffcb711f, 0xffca711d, 0xffca701b, 0xffca7019,
+        0xffca7017, 0xffc86d17, 0xffc66a17, 0xffc56717, 0xffc36417, 0xffc26217, 0xffc05f18, 0xffbe5c18,
+        0xffbd5918, 0xffbb5718, 0xffba5418, 0xffb85118, 0xffb74e19, 0xffb54b19, 0xffb34919, 0xffb24619,
+        0xffb04319, 0xffaf4019, 0xffad3e1a, 0xffab3b1a, 0xffaa381a, 0xffa8351a, 0xffa7321a, 0xffa5301a,
+        0xffa42d1b, 0xffa22a1b, 0xffa0271b, 0xff9f251b, 0xff9d221b, 0xff9c1f1b, 0xff9a1c1c, 0xff98191c,
+        0xff97171c, 0xff95141c, 0xff94111c, 0xff920e1c, 0xff910c1d, 0xff8f091d, 0xff8e061d, 0xff8c031d
+    };
 
 MainWindow7::MainWindow7(QWidget *parent)
     : QMainWindow(parent)
@@ -24,18 +61,45 @@ MainWindow7::MainWindow7(QWidget *parent)
     , cudaProcessor(nullptr)
 {
     ui->setupUi(this);
+    qRegisterMetaType<ScanFrame>();
 
     initWidget(); // 初始化界面
-
-    initSlot();   // 初始化信号
 
     initVTK();    // 初始化VTK
 
     // 初始化 Scan 对象
-    m_scan = new Scan(this);
+    m_scan = new Scan;
+    m_scan->moveToThread(&m_scanThread);
+    // 扫描自然结束/停止时同步 UI 状态
+    connect(m_scan, &Scan::finished, this, [this]() {
+        m_isScanning = false;
+        m_drawPaused = false;
+        ui->pushButton_7->setText("开始扫描");
+    });
+    m_scanThread.start();
 
     // 延迟注册 VBO (等待 OpenGL 上下文就绪)
     QTimer::singleShot(200, this, &MainWindow7::registerVBOWithCUDA);
+}
+
+void MainWindow7::autoStartDebug(const QString& csvPath)
+{
+    if (!m_scan || !m_scan->loadCSVFile(csvPath)) {
+        qDebug() << "autoStartDebug: failed to load" << csvPath;
+        return;
+    }
+    initPointCloud();
+    disconnect(m_scan, &Scan::newFrameAvailable, this, &MainWindow7::renderFrame);
+    connect(m_scan, &Scan::newFrameAvailable, this, &MainWindow7::renderFrame);
+    QMetaObject::invokeMethod(m_scan, [this]() { m_scan->start(); }, Qt::QueuedConnection);
+    m_isScanning = true;
+    qDebug() << "autoStartDebug started";
+    QTimer::singleShot(10000, this, [this]() { on_pushButton_12_clicked(); });
+    QTimer::singleShot(25000, this, [this]() {
+        vtkIdType total = 0;
+        for (auto& ch : m_surfChunks) total += ch.cells->GetNumberOfCells();
+        qDebug() << "DBG5 chunks" << m_surfChunks.size() << "tri" << total << "gridRows" << m_surfGrid.size();
+    });
 }
 
 MainWindow7::~MainWindow7()
@@ -58,6 +122,17 @@ MainWindow7::~MainWindow7()
         delete vboColors;
         vboColors = nullptr;
     }
+
+    if (m_scan) {
+        QMetaObject::invokeMethod(m_scan, [this]() { m_scan->stop(); }, Qt::BlockingQueuedConnection);
+    }
+    if (m_scan) {
+        QMetaObject::invokeMethod(m_scan, [this]() { m_scan->stop(); }, Qt::BlockingQueuedConnection);
+        m_scan->deleteLater();
+        m_scan = nullptr;
+    }
+    m_scanThread.quit();
+    m_scanThread.wait();
 
     delete ui;
 }
@@ -90,12 +165,6 @@ bool MainWindow7::eventFilter(QObject *obj, QEvent *event)
     return QMainWindow::eventFilter(obj, event);
 }
 
-//初始化参数
-void MainWindow7::initParam()
-{
-
-}
-
 // 初始化界面
 void MainWindow7::initWidget()
 {
@@ -107,18 +176,17 @@ void MainWindow7::initWidget()
 
 }
 
-// 初始化信号
-void MainWindow7::initSlot()
-{
-
-}
-
 // 初始化VTK
 void MainWindow7::initVTK()
 {
     // 创建渲染器
     renderer = vtkSmartPointer<vtkRenderer>::New();
     renderer->SetBackground(0, 0, 0);
+
+    // remove default frustum cullers so the custom VBO actor is always rendered
+    while (renderer->GetCullers()->GetNumberOfItems() > 0) {
+        renderer->RemoveCuller(renderer->GetCullers()->GetLastItem());
+    }
 
     // 获取渲染窗口
     renderWindow = ui->vtkWidget->renderWindow();
@@ -135,6 +203,15 @@ void MainWindow7::initVTK()
     mouseCallback->SetCallback(onMouseClick);
     mouseCallback->SetClientData(this);
     interactor->AddObserver(vtkCommand::LeftButtonPressEvent, mouseCallback);
+
+    // remember when the user rotates/zooms so auto-fit pauses during interaction
+    vtkSmartPointer<vtkCallbackCommand> interactionCallback = vtkSmartPointer<vtkCallbackCommand>::New();
+    interactionCallback->SetCallback([](vtkObject*, unsigned long, void* cd, void*) {
+        MainWindow7* self = static_cast<MainWindow7*>(cd);
+        self->m_lastInteractionMs = QDateTime::currentMSecsSinceEpoch();
+    });
+    interactionCallback->SetClientData(this);
+    interactor->AddObserver(vtkCommand::InteractionEvent, interactionCallback);
 
     // 第一个点标记（红色）
     vtkSmartPointer<vtkSphereSource> sphere1 = vtkSmartPointer<vtkSphereSource>::New();
@@ -180,98 +257,6 @@ void MainWindow7::initVTK()
     renderWindow->Render();
 }
 
-// // 初始化点云
-// void MainWindow7::initPointCloud()
-// {
-//     savedAmpValues.clear();
-//     savedTofValues.clear();
-
-//     points = vtkSmartPointer<vtkPoints>::New();
-//     vertices = vtkSmartPointer<vtkCellArray>::New();
-//     colors = vtkSmartPointer<vtkUnsignedCharArray>::New();
-//     colors->SetNumberOfComponents(3);
-//     colors->SetName("Colors");
-
-//     polyData = vtkSmartPointer<vtkPolyData>::New();
-//     polyData->SetPoints(points);
-//     polyData->SetVerts(vertices);
-//     polyData->GetPointData()->SetScalars(colors);
-
-//     mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
-//     mapper->SetInputData(polyData);
-
-//     actor = vtkSmartPointer<vtkActor>::New();
-//     actor->SetMapper(mapper);
-//     actor->GetProperty()->SetPointSize(3);
-//     renderer->AddActor(actor);
-
-//     renderWindow->Render();
-// }
-
-// void MainWindow7::AddPointCloud(const double pose[], const double amp[], const double tof[], double si, int beam)
-// {
-//     int centerBeam = (beam - 1) / 2;
-//     double spacing = 0.3;
-
-//     vtkSmartPointer<vtkTransform> transform = vtkSmartPointer<vtkTransform>::New();
-//     transform->PostMultiply();
-//     transform->RotateZ(-pose[3]);
-//     transform->RotateY(pose[4]);
-//     transform->RotateX(pose[5]);
-
-//     for (int i = 0; i < beam; i++) {
-//         if (amp[i] == 0.0 || tof[i] == 0.0) continue;
-
-//         double offset = (i - centerBeam) * spacing;
-//         double localPoint[3] = {0.0, offset, -si * 0.5};
-//         double globalPoint[3];
-//         transform->TransformPoint(localPoint, globalPoint);
-
-//         double worldX = globalPoint[0] + pose[0];
-//         double worldY = globalPoint[1] + pose[1];
-//         double worldZ = globalPoint[2] + pose[2];
-
-//         // 保存原始数据
-//         savedAmpValues.push_back(amp[i]);
-//         savedTofValues.push_back(tof[i]);
-
-//         // 获取当前值
-//         double value = isAmpMode ? amp[i] : tof[i];
-//         unsigned char r, g, b;
-//         GetColorFromValue(value, r, g, b);
-
-//         // 追加点
-//         // vtkIdType pid = points->InsertNextPoint(worldX, worldY, worldZ);
-//         // vertices->InsertNextCell(1, &pid);
-//         // colors->InsertNextTuple3(r, g, b);
-
-//         // 环形缓冲
-//         vtkIdType id = (currentIndex % MAX_POINTS);
-//         if (points->GetNumberOfPoints() < MAX_POINTS) {
-//             // 初始阶段：点数未满，正常插入
-//             vtkIdType pid = points->InsertNextPoint(worldX, worldY, worldZ);
-//             vertices->InsertNextCell(1, &pid);
-//             colors->InsertNextTuple3(r, g, b);
-//         } else {
-//             // 点数已满：覆盖旧点
-//             points->SetPoint(id, worldX, worldY, worldZ);
-//             colors->SetTuple3(id, r, g, b);
-//         }
-//         currentIndex++;
-//     }
-
-//     if(currentIndex % 100 == 0)
-//     {
-//         points->Modified();
-//         colors->Modified();
-//         polyData->Modified();
-
-//         renderer->ResetCamera();
-
-//         renderWindow->Render();
-//     }
-// }
-
 // 初始化点云
 void MainWindow7::initPointCloud()
 {
@@ -293,11 +278,21 @@ void MainWindow7::initPointCloud()
     mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
     mapper->SetInputData(polyData);
 
-    // 创建自定义Actor
+    if (vboActor) {
+        renderer->RemoveActor(vboActor);
+        vboActor = nullptr;
+    }
     vboActor = vtkSmartPointer<vtkVBOActor>::New();
-    vboActor->SetMapper(mapper);
     vboActor->VisibilityOn();
     renderer->AddActor(vboActor);
+    m_surfChunks.clear();
+    newSurfaceChunk();
+    qDebug() << "initPointCloud: vboActor added";
+    cloudValidPoints = 0;
+    cloudBoundsValid = false;
+    cameraFitValid = false;
+    if (vboActor) vboActor->SetValidPointCount(0);
+    if (cudaProcessor && vboRegistered) resetVBO(cudaProcessor);
 
     renderer->ResetCamera();
 
@@ -312,7 +307,7 @@ void MainWindow7::registerVBOWithCUDA()
     }
 
     if (!cudaProcessor) {
-        cudaProcessor = createCUDAProcessor(MAX_POINTS_PER_FRAME);
+        cudaProcessor = createCUDAProcessor(MAX_BEAM);
         if (!cudaProcessor) {
             qDebug() << "Failed to create CUDA processor";
             return;
@@ -354,6 +349,8 @@ void MainWindow7::registerVBOWithCUDA()
     if (result == 0) {
         qDebug() << "VBO registered to CUDA successfully!";
         vboInitialized = true;
+        setColorLUT(cudaProcessor, color_Amplitude, 256);
+        cloudValidPoints = 0;
     } else {
         qDebug() << "Failed to register VBO to CUDA";
         delete vboPoints;
@@ -364,58 +361,203 @@ void MainWindow7::registerVBOWithCUDA()
 }
 
 void MainWindow7::AddPointCloud(const double pose[], const double amp[],
-                                const double tof[], double si, int beam)
+                                const double tof[], double si, int beam,
+                                bool renderNow, const double* beamZ,
+                                const float* worldXYZ, int worldCount,
+                                const int* gridK, const int* gridJ, int passIndex,
+                                double lx, double ly)
 {
     if (beam <= 0) return;
     if (!isCUDAAvailable()) return;
+    if (!vboPoints || !vboColors || !vboActor) return;
 
     if (!cudaProcessor) {
-        cudaProcessor = createCUDAProcessor(beam);
+        cudaProcessor = createCUDAProcessor(MAX_BEAM);
         if (!cudaProcessor) return;
+        setColorLUT(cudaProcessor, color_Amplitude, 256);
     }
 
-    int result = processDirectVBO(cudaProcessor, pose, amp, tof, si, beam,
-                                  isAmpMode ? 1 : 0);
+    if (cloudValidPoints >= MAX_POINTS_PER_FRAME) return;
 
-    if (result == 0) {
-        for (int i = 0; i < beam; i++) {
-            if (amp[i] != 0.0 && tof[i] != 0.0) {
+    int n = worldXYZ ? worldCount : beam;
+    if (n > MAX_BEAM) n = MAX_BEAM;
+
+    int validCount = 0;
+    for (int i = 0; i < n; i++) {
+        if (amp[i] != 0.0 && tof[i] != 0.0) {
+            validCount++;
+            if ((int)savedAmpValues.size() < MAX_POINTS_PER_FRAME) {
                 savedAmpValues.push_back(amp[i]);
                 savedTofValues.push_back(tof[i]);
+                if (gridK && gridJ) {
+                    m_gridK.push_back(gridK[i]); m_gridJ.push_back(gridJ[i]);
+                    m_surfPointPass.push_back(passIndex);
+                }
+                if (worldXYZ) {
+                    m_cloudXYZ.push_back(worldXYZ[i*3+0]);
+                    m_cloudXYZ.push_back(worldXYZ[i*3+1]);
+                    m_cloudXYZ.push_back(worldXYZ[i*3+2]);
+                }
+            }
+        }
+    }
+    if (validCount > 0) {
+        std::array<double, 6> pp = {pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]};
+        m_framePose.push_back(pp);
+        m_frameSi.push_back(si);
+        m_frameBeam.push_back(beam);
+        m_frameLX.push_back(lx);
+        m_frameLY.push_back(ly);
+        m_frameCount.push_back(validCount);
+    }
+    if (validCount == 0) return;
+
+    if (worldXYZ) {
+        for (int i = 0; i < n; i++) {
+            double px = worldXYZ[i*3+0], py = worldXYZ[i*3+1], pz = worldXYZ[i*3+2];
+            if (!cloudBoundsValid || px < cloudBoundsMin[0]) cloudBoundsMin[0] = px;
+            if (!cloudBoundsValid || px > cloudBoundsMax[0]) cloudBoundsMax[0] = px;
+            if (!cloudBoundsValid || py < cloudBoundsMin[1]) cloudBoundsMin[1] = py;
+            if (!cloudBoundsValid || py > cloudBoundsMax[1]) cloudBoundsMax[1] = py;
+            if (!cloudBoundsValid || pz < cloudBoundsMin[2]) cloudBoundsMin[2] = pz;
+            if (!cloudBoundsValid || pz > cloudBoundsMax[2]) cloudBoundsMax[2] = pz;
+        }
+    } else {
+        for (int k = 0; k < 3; k++) {
+            if (!cloudBoundsValid || pose[k] < cloudBoundsMin[k]) cloudBoundsMin[k] = pose[k];
+            if (!cloudBoundsValid || pose[k] > cloudBoundsMax[k]) cloudBoundsMax[k] = pose[k];
+        }
+    }
+    cloudBoundsValid = true;
+    vboActor->SetCloudBounds(cloudBoundsMin[0] - 20, cloudBoundsMax[0] + 20,
+                            cloudBoundsMin[1] - 20, cloudBoundsMax[1] + 20,
+                            cloudBoundsMin[2] - 20, cloudBoundsMax[2] + 20);
+
+    int result;
+    if (worldXYZ) {
+        result = processDirectCloudVBO(cudaProcessor, worldXYZ, amp, tof, n,
+                                       isAmpMode ? 1 : 0, cloudValidPoints);
+    } else {
+        double localZ[64];
+        for (int i = 0; i < beam; i++)
+            localZ[i] = beamZ ? beamZ[i] : -si * 0.5;
+        result = processDirectVBO(cudaProcessor, pose, amp, tof, localZ, beam,
+                                  isAmpMode ? 1 : 0, cloudValidPoints);
+    }
+
+    if (result == 0) {
+        cloudValidPoints += validCount;
+        if (cloudValidPoints > MAX_POINTS_PER_FRAME) cloudValidPoints = MAX_POINTS_PER_FRAME;
+
+        vboActor->SetVBOIDs(vboPoints->bufferId(), vboColors->bufferId());
+        vboActor->SetValidPointCount(cloudValidPoints);
+        vboActor->SetVBOInitialized(true);
+
+        { // auto-fit camera to the growing cloud (throttled)
+            static QElapsedTimer fitTimer;
+            if (!fitTimer.isValid()) fitTimer.start();
+            bool firstFit = !cameraFitValid;
+            bool outOfFit = !firstFit &&
+                (cloudBoundsMin[0] < cameraFitMin[0] || cloudBoundsMax[0] > cameraFitMax[0] ||
+                 cloudBoundsMin[1] < cameraFitMin[1] || cloudBoundsMax[1] > cameraFitMax[1] ||
+                 cloudBoundsMin[2] < cameraFitMin[2] || cloudBoundsMax[2] > cameraFitMax[2]);
+            bool userActive = QDateTime::currentMSecsSinceEpoch() - m_lastInteractionMs < 3000;
+            if (!userActive && (firstFit || outOfFit) && (firstFit || fitTimer.elapsed() >= 1500)) {
+                double cloudBounds[6] = {
+                    cloudBoundsMin[0] - 20, cloudBoundsMax[0] + 20,
+                    cloudBoundsMin[1] - 20, cloudBoundsMax[1] + 20,
+                    cloudBoundsMin[2] - 20, cloudBoundsMax[2] + 20
+                };
+                if (firstFit) {
+                    double cx = (cloudBounds[0] + cloudBounds[1]) * 0.5;
+                    double cy = (cloudBounds[2] + cloudBounds[3]) * 0.5;
+                    double cz = (cloudBounds[4] + cloudBounds[5]) * 0.5;
+                    camera->SetFocalPoint(cx, cy, cz);
+                    camera->SetPosition(cx, cy, cz + 3000);
+                    camera->SetViewUp(0, 1, 0);
+                }
+                renderer->ResetCamera(cloudBounds);
+                for (int k = 0; k < 3; k++) {
+                    cameraFitMin[k] = cloudBoundsMin[k];
+                    cameraFitMax[k] = cloudBoundsMax[k];
+                }
+                cameraFitValid = true;
+                fitTimer.restart();
             }
         }
 
-        if (beam > vboMaxPoints) {
-            qDebug() << "Beam exceeds VBO capacity:" << beam << ">" << vboMaxPoints;
-            return;
+        if (renderNow) {
+            renderWindow->Render();
+
         }
-
-        // 直接告诉 vtkVBOActor 使用的 VBO
-        vboActor->SetVBOIDs(vboPoints->bufferId(), vboColors->bufferId());
-        vboActor->SetValidPointCount(beam);
-        vboActor->SetVBOInitialized(true);
-
-        // 确保 CUDA 已经完成写入
-        cudaDeviceSynchronize();
-
-        currentIndex += beam;
-
-        // 只在第一次或相机重置时重置相机
-        if (currentIndex == beam) {  // 第一次添加点
-            renderer->ResetCamera();
-        }
-
-        renderWindow->Render();
-
-    } else {
+    } else if (result != -2) {
         qDebug() << "VBO Direct failed:" << result;
     }
+}
+
+void MainWindow7::resetPointCloud()
+{
+    cloudValidPoints = 0;
+    cloudBoundsValid = false;
+    cameraFitValid = false;
+    savedAmpValues.clear();
+    savedTofValues.clear();
+    m_gridK.clear();
+    m_gridJ.clear();
+    m_surfPointPass.clear();
+    m_framePose.clear();
+    m_frameSi.clear();
+    m_frameBeam.clear();
+    m_frameLX.clear();
+    m_frameLY.clear();
+    m_frameCount.clear();
+    m_cloudXYZ.clear();
+    m_meshBuiltCount = 0;
+    m_meshIdx.clear();
+    m_meshQuadVerts.clear();
+    m_meshVertIdx.clear();
+    m_meshPatchDone.clear();
+    m_surfGrid.clear();
+    m_surfDataRows.clear();
+    m_surfRowCnt.clear();
+    m_surfRowDone.clear();
+    m_surfPrevRow.clear();
+    m_surfHasPrev = false;
+    m_surfLastDataJ = 0;
+    m_surfLastDir = 0;
+    m_surfDirInit = false;
+    m_surfDataN = 0;
+    m_meshCurBand = -1;
+    m_surfRowLastSeen.clear();
+    for (auto& ch : m_surfChunks) if (ch.actor) ch.actor->VisibilityOff();
+    m_surfChunks.clear();
+    newSurfaceChunk();
+    m_surfaceMode = false;
+    if (cudaProcessor && vboRegistered) {
+        resetVBO(cudaProcessor);
+    }
+    if (vboActor) {
+        vboActor->SetValidPointCount(0);
+        vboActor->SetVBOInitialized(false);
+    }
+    renderWindow->Render();
 }
 
 void MainWindow7::renderFrame(const ScanFrame& frame)
 {
     // 添加点云
-    AddPointCloud(frame.pose, frame.amp, frame.tof, frame.si, frame.beam);
+    static QElapsedTimer lastRender;
+    if (!lastRender.isValid()) lastRender.start();
+    bool renderNow = lastRender.elapsed() >= 33;
+    if (renderNow) lastRender.restart();
+    AddPointCloud(frame.pose, frame.amp, frame.tof, frame.si, frame.beam, renderNow, frame.beamZ,
+                        frame.hasWorld ? frame.worldXYZ : nullptr, frame.hasWorld ? frame.worldCount : 0,
+                        frame.hasGrid ? frame.gridK : nullptr, frame.hasGrid ? frame.gridJ : nullptr,
+                        frame.passIndex, frame.lx, frame.ly);
+    {
+        static int sTick = 0;
+        if (++sTick % 10 == 0) updateSurfaceMesh(frame.passIndex);
+    }
 
     static int renderCount = 0;
     static QElapsedTimer renderTimer;
@@ -423,13 +565,12 @@ void MainWindow7::renderFrame(const ScanFrame& frame)
         renderTimer.start();
     }
 
-    renderCount++;
+    if (renderNow) renderCount++;
     if (renderTimer.elapsed() >= 1000) {
         double renderFps = renderCount;
         qDebug() << "渲染帧率:" << renderFps << "fps";
         renderCount = 0;
         renderTimer.restart();
-
 
         // 打印实时数据到 UI
         QString text = QString("Frame: %1 SI: %2 Beam: %3 "
@@ -452,7 +593,7 @@ void MainWindow7::renderFrame(const ScanFrame& frame)
     }
 }
 
-void MainWindow7::onMouseClick(vtkObject* obj, unsigned long event, void* clientData, void* callData)
+void MainWindow7::onMouseClick(vtkObject* obj, unsigned long, void* clientData, void*)
 {
     MainWindow7* self = static_cast<MainWindow7*>(clientData);
     if (!self->isMeasuring) return;
@@ -517,41 +658,6 @@ void MainWindow7::pickPoint(int x, int y)
 
 void MainWindow7::GetColorFromValue(double value, unsigned char& r, unsigned char& g, unsigned char& b)
 {
-    static const uint32_t color_Amplitude[] = {
-        0xffffffff, 0xfffafcfe, 0xfff6fafd, 0xfff2f7fd, 0xffeef5fc, 0xffeaf2fb, 0xffe6f0fb, 0xffe1edfa,
-        0xffddebf9, 0xffd9e8f9, 0xffd5e6f8, 0xffd1e3f7, 0xffcde1f7, 0xffc8def6, 0xffc4dcf6, 0xffc0d9f5,
-        0xffbcd7f4, 0xffb8d4f4, 0xffb4d2f3, 0xffafd0f2, 0xffabcdf2, 0xffa7cbf1, 0xffa3c8f0, 0xff9fc6f0,
-        0xff9bc3ef, 0xff96c1ef, 0xff92beee, 0xff8ebced, 0xff8ab9ed, 0xff86b7ec, 0xff82b4eb, 0xff7db2eb,
-        0xff79afea, 0xff75ade9, 0xff71aae9, 0xff6da8e8, 0xff69a6e8, 0xff66a1e5, 0xff639de2, 0xff6099df,
-        0xff5d95dc, 0xff5a91da, 0xff588dd7, 0xff5589d4, 0xff5285d1, 0xff4f81cf, 0xff4c7dcc, 0xff4979c9,
-        0xff4775c6, 0xff4471c3, 0xff416dc1, 0xff3e69be, 0xff3b65bb, 0xff3861b8, 0xff365db6, 0xff3359b3,
-        0xff3055b0, 0xff2d51ad, 0xff2a4daa, 0xff2749a8, 0xff2545a5, 0xff2241a2, 0xff1f3d9f, 0xff1c399d,
-        0xff19359a, 0xff163197, 0xff142d94, 0xff112991, 0xff0e258f, 0xff0b218c, 0xff081d89, 0xff051986,
-        0xff031584, 0xff041883, 0xff061c83, 0xff082083, 0xff0a2483, 0xff0c2883, 0xff0e2c83, 0xff103082,
-        0xff123482, 0xff143882, 0xff153c82, 0xff174082, 0xff194482, 0xff1b4881, 0xff1d4c81, 0xff1f5081,
-        0xff215481, 0xff235881, 0xff255c81, 0xff266080, 0xff286480, 0xff2a6880, 0xff2c6c80, 0xff2e7080,
-        0xff307480, 0xff32787f, 0xff347c7f, 0xff36807f, 0xff37847f, 0xff39887f, 0xff3b8c7f, 0xff3d907e,
-        0xff3f947e, 0xff41987e, 0xff439c7e, 0xff45a07e, 0xff47a47e, 0xff4ca67b, 0xff51a878, 0xff56aa75,
-        0xff5bac72, 0xff60ae6f, 0xff65b06c, 0xff6ab269, 0xff6fb467, 0xff74b764, 0xff79b961, 0xff7ebb5e,
-        0xff83bd5b, 0xff88bf58, 0xff8dc155, 0xff92c353, 0xff97c550, 0xff9cc74d, 0xffa1ca4a, 0xffa6cc47,
-        0xffabce44, 0xffb0d041, 0xffb5d23f, 0xffbad43c, 0xffbfd639, 0xffc4d836, 0xffc9da33, 0xffcedd30,
-        0xffd3df2d, 0xffd8e12b, 0xffdde328, 0xffe2e525, 0xffe7e722, 0xffece91f, 0xfff1eb1c, 0xfff6ed19,
-        0xfffcf017, 0xfffaec19, 0xfff9e91b, 0xfff8e61d, 0xfff7e31f, 0xfff6df22, 0xfff5dc24, 0xfff4d926,
-        0xfff2d628, 0xfff1d32b, 0xfff0cf2d, 0xffefcc2f, 0xffeec931, 0xffedc633, 0xffecc236, 0xffeabf38,
-        0xffe9bc3a, 0xffe8b93c, 0xffe7b63f, 0xffe6b241, 0xffe5af43, 0xffe4ac45, 0xffe2a947, 0xffe1a54a,
-        0xffe0a24c, 0xffdf9f4e, 0xffde9c50, 0xffdd9953, 0xffdc9555, 0xffda9257, 0xffd98f59, 0xffd88c5b,
-        0xffd7885e, 0xffd68560, 0xffd58262, 0xffd47f64, 0xffd37c67, 0xffd27b64, 0xffd27b62, 0xffd27b60,
-        0xffd27a5e, 0xffd17a5b, 0xffd17a59, 0xffd17957, 0xffd17955, 0xffd07953, 0xffd07850, 0xffd0784e,
-        0xffd0784c, 0xffcf774a, 0xffcf7747, 0xffcf7745, 0xffcf7643, 0xffce7641, 0xffce763f, 0xffce753c,
-        0xffce753a, 0xffcd7538, 0xffcd7436, 0xffcd7433, 0xffcd7431, 0xffcc732f, 0xffcc732d, 0xffcc732b,
-        0xffcc7228, 0xffcb7226, 0xffcb7224, 0xffcb7122, 0xffcb711f, 0xffca711d, 0xffca701b, 0xffca7019,
-        0xffca7017, 0xffc86d17, 0xffc66a17, 0xffc56717, 0xffc36417, 0xffc26217, 0xffc05f18, 0xffbe5c18,
-        0xffbd5918, 0xffbb5718, 0xffba5418, 0xffb85118, 0xffb74e19, 0xffb54b19, 0xffb34919, 0xffb24619,
-        0xffb04319, 0xffaf4019, 0xffad3e1a, 0xffab3b1a, 0xffaa381a, 0xffa8351a, 0xffa7321a, 0xffa5301a,
-        0xffa42d1b, 0xffa22a1b, 0xffa0271b, 0xff9f251b, 0xff9d221b, 0xff9c1f1b, 0xff9a1c1c, 0xff98191c,
-        0xff97171c, 0xff95141c, 0xff94111c, 0xff920e1c, 0xff910c1d, 0xff8f091d, 0xff8e061d, 0xff8c031d
-    };
-
     value = std::max(0.0, std::min(1.0, value));
 
     const int colorCount = sizeof(color_Amplitude) / sizeof(uint32_t);
@@ -567,36 +673,105 @@ void MainWindow7::GetColorFromValue(double value, unsigned char& r, unsigned cha
 // 开始绘制
 void MainWindow7::on_pushButton_clicked()
 {
-    // 初始化点云
-    initPointCloud();
+    // 仅全新开始（未扫描且非暂停）时重置绘制数据；
+    // 暂停后继续保留数据；已在扫描时不重置
+    if (!vboActor) {
+        // Drawing was never initialized (e.g. the user clicked "start scan"
+        // before "start drawing"): initialize it even though the scan is
+        // already running.
+        initPointCloud();
+    } else if (!m_isScanning && !m_drawPaused) {
+        initPointCloud();
+    }
 
+    disconnect(m_scan, &Scan::newFrameAvailable, this, &MainWindow7::renderFrame);
     connect(m_scan, &Scan::newFrameAvailable, this, &MainWindow7::renderFrame);
 
-    // 启动扫描
     if (!m_isScanning) {
-        m_scan->start();
+        QMetaObject::invokeMethod(m_scan, [this]() { m_scan->start(); }, Qt::QueuedConnection);
         m_isScanning = true;
         ui->pushButton_7->setText("停止扫描");
         qDebug() << "Scan started for rendering";
+    } else {
+        qDebug() << "Drawing connected (scan already running)";
     }
+    m_drawPaused = false;
 }
 
-// 停止绘制
+// 停止绘制（暂停，可继续）
 void MainWindow7::on_pushButton_2_clicked()
 {
-
+    if (m_isScanning) {
+        QMetaObject::invokeMethod(m_scan, [this]() { m_scan->pause(); }, Qt::QueuedConnection);
+        m_isScanning = false;
+        m_drawPaused = true;
+        ui->pushButton_7->setText("开始扫描");
+        qDebug() << "Drawing paused";
+    }
 }
 
 // 结束绘制
 void MainWindow7::on_pushButton_3_clicked()
 {
-
+    if (m_isScanning) {
+        QMetaObject::invokeMethod(m_scan, [this]() { m_scan->stop(); }, Qt::QueuedConnection);
+        m_isScanning = false;
+        m_drawPaused = false;
+        ui->pushButton_7->setText("开始扫描");
+    }
+    // 收尾剩余行，形成完整曲面
+    updateSurfaceMesh(m_meshCurBand, true);
+    renderWindow->Render();
+    QTimer::singleShot(800, this, [this]() {
+        updateSurfaceMesh(m_meshCurBand, true);
+        renderWindow->Render();
+    });
+    qDebug() << "Drawing finished";
 }
 
 // 保存数据
 void MainWindow7::on_pushButton_5_clicked()
 {
+    int n = (int)m_frameCount.size();
+    if (n == 0) {
+        QMessageBox::information(this, "保存数据", "当前没有可保存的数据");
+        return;
+    }
+    QString filename = QFileDialog::getSaveFileName(
+        this, "保存数据", "", "CSV Files (*.csv);;All Files (*)");
+    if (filename.isEmpty()) return;
+    if (!filename.endsWith(".csv", Qt::CaseInsensitive)) filename += ".csv";
+    QFile file(filename);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "错误", "无法写入文件: " + filename);
+        return;
+    }
+    QTextStream out(&file);
+    out.setRealNumberPrecision(6);
+    // 与导入的 CSV 格式保持一致
+    out << "X,Y,Z,A,B,C,SI";
+    for (int e = 1; e <= 49; e++) out << ",AMP_" << e << ",TOF_" << e;
+    out << ",BEAM,LX,LY\n";
 
+    int totalPts = (int)savedAmpValues.size();
+    int p = 0;
+    for (int f = 0; f < n; f++) {
+        const std::array<double, 6>& pp = m_framePose[f];
+        out << pp[0] << ',' << pp[1] << ',' << pp[2] << ','
+            << pp[3] << ',' << pp[4] << ',' << pp[5] << ','
+            << m_frameSi[f] << ',';
+        int cnt = m_frameCount[f];
+        for (int e = 0; e < 49; e++) {
+            if (e < cnt && p + e < totalPts)
+                out << savedAmpValues[p + e] << ',' << savedTofValues[p + e];
+            else
+                out << "0,0";
+            if (e < 48) out << ',';
+        }
+        out << ',' << m_frameBeam[f] << ',' << m_frameLX[f] << ',' << m_frameLY[f] << '\n';
+        p += cnt;
+    }
+    qDebug() << "Saved" << n << "frames to" << filename;
 }
 
 // 加载数据
@@ -704,7 +879,6 @@ void MainWindow7::on_pushButton_6_clicked()
 
     // 统计信息
     bool canceled = false;
-    int count = 0;
     int beam = 0;
     double longmen[2] = {0.0};
     double si = 0.0;
@@ -719,9 +893,9 @@ void MainWindow7::on_pushButton_6_clicked()
     int AMP_1 = get("AMP_1");
     int TOF_1 = get("TOF_1");
 
+    std::string prevLine;
     std::string line;
-
-    std::vector<std::string> cache;
+    int frameIndex = 0;
 
     while (std::getline(file, line))
     {
@@ -737,70 +911,47 @@ void MainWindow7::on_pushButton_6_clicked()
             progressDialog.setValue(static_cast<int>(progress));
         }
 
-        cache.push_back(line);
+        if (frameIndex == 0) {
+            prevLine = line;
+            frameIndex++;
+            continue;
+        }
 
-        if (cache.size() < 3) continue;
-
-        std::vector<std::string> cells_main = parseCSVLine(cache[0]);
-
+        std::vector<std::string> cells_main = parseCSVLine(prevLine);
         std::vector<std::string> cells_current = parseCSVLine(line);
 
-        // 读取波束
-        if(BEAM != -1 && safe_stod(cells_main[BEAM]))
-        {
-            beam = safe_stod(cells_main[BEAM]);
+        beam = 49;
+        if (BEAM != -1 && BEAM < (int)cells_main.size()) {
+            double bv = safe_stod(cells_main[BEAM], 49.0);
+            if (bv > 0 && bv <= 64) beam = (int)bv;
         }
-        if(BEAM == -1) beam = 49;
 
-        // 读取龙门坐标
-        if((LX != -1 || LY != -1) && (safe_stod(cells_main[LX]) || safe_stod(cells_main[LY])))
-        {
-            longmen[0] = safe_stod(cells_main[LX]);
-            longmen[1] = safe_stod(cells_main[LY]);
-        }
-        if(LX == -1) longmen[0] = 0.0;
-        if(LY == -1) longmen[1] = 0.0;
+        if (LX != -1 && LX < (int)cells_main.size()) longmen[0] = safe_stod(cells_main[LX]);
+        if (LY != -1 && LY < (int)cells_main.size()) longmen[1] = safe_stod(cells_main[LY]);
 
-        // 读取机器人位姿
-        double pose[6];
-        for (int i = 0; i < 6; i++)
-        {
-            pose[i] = safe_stod(cells_main[X + i]);
-        }
-        pose[0] = pose[0] + longmen[1];
-        pose[1] = pose[1] - longmen[0];
-
-        // 读取SI值
-        if(SI != -1) si = safe_stod(cells_current[SI]);
-        if(SI == -1) si = 0.0;
-
-        // 读取AMP值
-        for (int i = 0; i < beam; i++)
-        {
-            int ampIndex = AMP_1 + 2 * i;
-            if (ampIndex < (int)cells_current.size()) {
-                amp[i] = safe_stod(cells_current[ampIndex]);
-            } else {
-                amp[i] = 0.0;
+        double pose[6] = {0, 0, 0, 0, 0, 0};
+        if (X != -1) {
+            for (int i = 0; i < 6 && (X + i) < (int)cells_main.size(); i++) {
+                pose[i] = safe_stod(cells_main[X + i]);
             }
         }
+        pose[0] += longmen[1];
+        pose[1] -= longmen[0];
 
-        // 读取TOF值
-        for (int i = 0; i < beam; i++)
-        {
-            int tofIndex = TOF_1 + 2 * i;
-            if (tofIndex < (int)cells_current.size()) {
-                tof[i] = safe_stod(cells_current[tofIndex]);
-            } else {
-                tof[i] = 0.0;
-            }
+        si = 0.0;
+        if (SI != -1 && SI < (int)cells_current.size()) si = safe_stod(cells_current[SI]);
+
+        for (int i = 0; i < beam; i++) {
+            int ampIndex = (AMP_1 != -1 ? AMP_1 + 2 * i : -1);
+            int tofIndex = (TOF_1 != -1 ? TOF_1 + 2 * i : -1);
+            amp[i]  = (ampIndex >= 0 && ampIndex < (int)cells_current.size()) ? safe_stod(cells_current[ampIndex]) : 0.0;
+            tof[i]  = (tofIndex >= 0 && tofIndex < (int)cells_current.size()) ? safe_stod(cells_current[tofIndex]) : 0.0;
         }
 
-        // 添加点云
-        AddPointCloud(pose, amp, tof, si, beam);
+        AddPointCloud(pose, amp, tof, si, beam, false);
 
-        // 移除已处理的最早行
-        cache.erase(cache.begin());
+        prevLine = line;
+        frameIndex++;
     }
 
     file.close();
@@ -811,58 +962,38 @@ void MainWindow7::on_pushButton_6_clicked()
     }
 
     progressDialog.setValue(100);
+
+    renderWindow->Render();
 }
 
 // 重置数据
 void MainWindow7::on_pushButton_4_clicked()
 {
-    initVTK();
+    m_drawPaused = false;
+    resetPointCloud();
 }
 
 // 数据模式
 void MainWindow7::on_pushButton_8_clicked()
 {
-    if (isAmpMode)
-    {
-        ui->pushButton_8->setText("TOF模式");
+    // switch AMP/TOF color mode for the whole accumulated cloud
+    const std::vector<double>& src = isAmpMode ? savedTofValues : savedAmpValues;
+    int n = (int)src.size();
+    if (n > cloudValidPoints) n = cloudValidPoints;
 
-        if(isCloudMode && !savedTofValues.empty())
-        {
-            for (size_t i = 0; i < savedTofValues.size(); i++) {
-                unsigned char r, g, b;
-                GetColorFromValue(savedTofValues[i], r, g, b);
-                colors->SetTuple3(i, r, g, b);
-            }
-
-            colors->Modified();
-
-            polyData->GetPointData()->SetScalars(colors);
-        }
+    if (n > 0 && cudaProcessor && vboRegistered) {
+        std::vector<float> values(n);
+        for (int i = 0; i < n; i++) values[i] = (float)src[i];
+        recolorVBO(cudaProcessor, values.data(), n);
     }
-    else
-    {
-        ui->pushButton_8->setText("AMP模式");
 
-        if(isCloudMode && !savedAmpValues.empty())
-        {
-            for (size_t i = 0; i < savedAmpValues.size(); i++) {
-                unsigned char r, g, b;
-                GetColorFromValue(savedAmpValues[i], r, g, b);
-                colors->SetTuple3(i, r, g, b);
-            }
-
-            colors->Modified();
-
-            polyData->GetPointData()->SetScalars(colors);
-        }
-    }
+    recolorSurfaceMesh();
+    isAmpMode = !isAmpMode;
+    ui->pushButton_8->setText(isAmpMode ? "TOF\u6a21\u5f0f" : "AMP\u6a21\u5f0f");
 
     renderWindow->Render();
-
-    isAmpMode = !isAmpMode;
 }
 
-// 数据测量
 void MainWindow7::on_pushButton_10_clicked()
 {
     isMeasuring = !isMeasuring;
@@ -1061,7 +1192,7 @@ void MainWindow7::on_pushButton_7_clicked()
         }
 
         // 启动数据采集
-        m_scan->start();
+        QMetaObject::invokeMethod(m_scan, [this]() { m_scan->start(); }, Qt::QueuedConnection);
         m_isScanning = true;
         ui->pushButton_7->setText("停止扫描");
 
@@ -1069,14 +1200,302 @@ void MainWindow7::on_pushButton_7_clicked()
 
     } else {
         // ===== 停止扫描 =====
-        m_scan->stop();
+        QMetaObject::invokeMethod(m_scan, [this]() { m_scan->stop(); }, Qt::QueuedConnection);
         m_isScanning = false;
+        m_drawPaused = false;
         ui->pushButton_7->setText("开始扫描");
 
         qDebug() << "Scan stopped";
     }
 }
 
+// 曲面模式 / 点云模式 切换
+void MainWindow7::on_pushButton_12_clicked()
+{
+    m_surfaceMode = !m_surfaceMode;
+    if (m_surfaceMode) {
+        updateSurfaceMesh(m_meshCurBand);
+        if (vboActor) vboActor->VisibilityOff();
+        for (auto& ch : m_surfChunks) if (ch.actor) ch.actor->VisibilityOn();
+        ui->pushButton_12->setText(QStringLiteral("点云模式"));
+    } else {
+        if (vboActor) vboActor->VisibilityOn();
+        for (auto& ch : m_surfChunks) if (ch.actor) ch.actor->VisibilityOff();
+        ui->pushButton_12->setText(QStringLiteral("曲面模式"));
+    }
+    renderWindow->Render();
+}
 
+void MainWindow7::newSurfaceChunk()
+{
+    SurfChunk c;
+    c.points = vtkSmartPointer<vtkPoints>::New();
+    c.cells = vtkSmartPointer<vtkCellArray>::New();
+    c.cellColors = vtkSmartPointer<vtkUnsignedCharArray>::New();
+    c.cellColors->SetNumberOfComponents(3);
+    c.poly = vtkSmartPointer<vtkPolyData>::New();
+    c.poly->SetPoints(c.points);
+    c.poly->SetPolys(c.cells);
+    c.poly->GetCellData()->SetScalars(c.cellColors);
+    c.mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+    c.mapper->SetInputData(c.poly);
+    c.mapper->SetScalarModeToUseCellData();
+    c.mapper->SetInterpolateScalarsBeforeMapping(0);
+    c.actor = vtkSmartPointer<vtkActor>::New();
+    c.actor->SetMapper(c.mapper);
+    c.actor->GetProperty()->LightingOff();
+    c.actor->SetVisibility(m_surfaceMode ? 1 : 0);
+    renderer->AddActor(c.actor);
+    m_surfChunks.push_back(c);
+    m_meshVertIdx.clear();
+}
 
+void MainWindow7::updateSurfaceMesh(int passIndex, bool forceTail)
+{
+    int n = (int)m_gridK.size();
+    if (n < 4 || (int)m_cloudXYZ.size() < n * 3) return;
+    if (m_surfChunks.empty()) return;
+    if (m_meshBuiltCount >= n && !forceTail) return;
+    if (m_meshBuiltCount < 0) m_meshBuiltCount = 0;
+    SurfChunk* cur = &m_surfChunks.back();
+    if (cur->cells->GetNumberOfCells() >= kChunkMaxCells)
+        { newSurfaceChunk(); cur = &m_surfChunks.back(); }
+
+    auto gridHave = [&](int m, int k) -> bool {
+        auto it = m_surfGrid.find(m);
+        return it != m_surfGrid.end() && it->second.find(k) != it->second.end();
+    };
+    auto cornerVert = [&](int cm, int ck) -> int {
+        long long ckey = ((long long)cm << 32) | (unsigned int)(ck & 0xFFFFFFFFLL);
+        auto it = m_meshVertIdx.find(ckey);
+        if (it != m_meshVertIdx.end()) return it->second;
+        const SurfCell& cell = m_surfGrid[cm][ck];
+        vtkIdType vid = cur->points->InsertNextPoint(cell.x, cell.y, cell.z);
+        m_meshVertIdx[ckey] = (int)vid;
+        return (int)vid;
+    };
+    auto createPatch = [&](int pm, int pk) {
+        long long pkey = ((long long)pm << 32) | (unsigned int)(pk & 0xFFFFFFFFLL);
+        if (m_meshPatchDone.find(pkey) != m_meshPatchDone.end()) return;
+        if (!gridHave(pm, pk) || !gridHave(pm + 1, pk) ||
+            !gridHave(pm + 1, pk + 1) || !gridHave(pm, pk + 1)) return;
+        int sw = cornerVert(pm, pk);
+        int se = cornerVert(pm + 1, pk);
+        int ne = cornerVert(pm + 1, pk + 1);
+        int nw = cornerVert(pm, pk + 1);
+        double p1[3], p2[3], p3[3], p4[3];
+        cur->points->GetPoint(sw, p1); cur->points->GetPoint(se, p2);
+        cur->points->GetPoint(ne, p3); cur->points->GetPoint(nw, p4);
+        double d1x = p1[0]-p3[0], d1y = p1[1]-p3[1], d1z = p1[2]-p3[2];
+        double d2x = p2[0]-p4[0], d2y = p2[1]-p4[1], d2z = p2[2]-p4[2];
+        int t1[3], t2[3];
+        if (d1x*d1x + d1y*d1y + d1z*d1z <= d2x*d2x + d2y*d2y + d2z*d2z) {
+            t1[0]=sw; t1[1]=se; t1[2]=ne; t2[0]=sw; t2[1]=ne; t2[2]=nw;
+        } else {
+            t1[0]=sw; t1[1]=se; t1[2]=nw; t2[0]=se; t2[1]=ne; t2[2]=nw;
+        }
+        const SurfCell& gc = m_surfGrid[pm][pk];
+        unsigned char r, g, bl;
+        GetColorFromValue(isAmpMode ? (double)gc.a : (double)gc.t, r, g, bl);
+        for (int tr = 0; tr < 2; tr++) {
+            const int* tv = (tr == 0) ? t1 : t2;
+            vtkIdType tri[3] = {tv[0], tv[1], tv[2]};
+            cur->cells->InsertNextCell(3, tri);
+            cur->cellColors->InsertNextTuple3(r, g, bl);
+            cur->triA.push_back(gc.a);
+            cur->triT.push_back(gc.t);
+        }
+        m_meshPatchDone.insert(pkey);
+    };
+    auto flushGridRow = [&](int m) {
+        if (m < 0) return;
+        auto it = m_surfGrid.find(m);
+        if (it == m_surfGrid.end()) return;
+        for (auto& kv : it->second) createPatch(m, kv.first);
+    };
+
+    auto buildRow = [&](long long rkey) {
+        int jj = (int)(rkey & 0xFFFFFFFFLL);
+        auto itr = m_surfDataRows.find(rkey);
+        if (itr == m_surfDataRows.end()) { m_surfRowDone.insert(rkey); return; }
+        const std::unordered_map<int, SurfCell>& row = itr->second;
+        if (row.empty()) { m_surfDataRows.erase(rkey); m_surfRowDone.insert(rkey); return; }
+        m_surfRowDone.insert(rkey);
+
+        // Fill interior k gaps so the patch test has no holes inside the row.
+        std::unordered_map<int, SurfCell> rowFilled;
+        if (row.size() > 1) {
+            std::vector<int> ks;
+            ks.reserve(row.size());
+            for (auto& kv : row) ks.push_back(kv.first);
+            std::sort(ks.begin(), ks.end());
+            for (size_t qi = 0; qi + 1 < ks.size(); qi++) {
+                int k0 = ks[qi], k1 = ks[qi + 1];
+                const SurfCell& a = row.at(k0);
+                const SurfCell& b = row.at(k1);
+                for (int k = k0; k <= k1; k++) {
+                    double tf = (double)(k - k0) / (double)(k1 - k0);
+                    SurfCell c;
+                    c.x = a.x + (float)((b.x - a.x) * tf);
+                    c.y = a.y + (float)((b.y - a.y) * tf);
+                    c.z = a.z + (float)((b.z - a.z) * tf);
+                    c.a = a.a + (float)((b.a - a.a) * tf);
+                    c.t = a.t + (float)((b.t - a.t) * tf);
+                    rowFilled[k] = c;
+                }
+            }
+        } else {
+            rowFilled = row;
+        }
+
+        if (!m_surfHasPrev) {
+            m_surfGrid[0] = rowFilled;
+            m_surfHasPrev = true;
+            m_surfDataN = 0;
+        } else {
+            const std::unordered_map<int, SurfCell>& prev = m_surfPrevRow;
+            int prevMin = prev.begin()->first, prevMax = prevMin;
+            for (auto& kv : prev) {
+                if (kv.first < prevMin) prevMin = kv.first;
+                if (kv.first > prevMax) prevMax = kv.first;
+            }
+            int curMin = rowFilled.begin()->first, curMax = curMin;
+            for (auto& kv : rowFilled) {
+                if (kv.first < curMin) curMin = kv.first;
+                if (kv.first > curMax) curMax = kv.first;
+            }
+            int spanMin = (prevMin < curMin) ? prevMin : curMin;
+            int spanMax = (prevMax > curMax) ? prevMax : curMax;
+            int m0 = m_surfDataN * 3;
+            for (int s = 1; s <= 3; s++) {
+                int m = m0 + s;
+                if (s == 3) {
+                    m_surfGrid[m] = rowFilled;
+                } else {
+                    double tf = (double)s / 3.0;
+                    std::unordered_map<int, SurfCell> sub;
+                    for (int k = spanMin; k <= spanMax; k++) {
+                        auto itp = prev.find(k);
+                        const SurfCell* pp = nullptr;
+                        if (itp != prev.end()) pp = &itp->second;
+                        else pp = (k < prevMin) ? &prev.at(prevMin) : &prev.at(prevMax);
+                        auto itc = rowFilled.find(k);
+                        const SurfCell* cc = nullptr;
+                        if (itc != rowFilled.end()) cc = &itc->second;
+                        else cc = (k < curMin) ? &rowFilled.at(curMin) : &rowFilled.at(curMax);
+                        SurfCell c;
+                        c.x = pp->x + (float)((cc->x - pp->x) * tf);
+                        c.y = pp->y + (float)((cc->y - pp->y) * tf);
+                        c.z = pp->z + (float)((cc->z - pp->z) * tf);
+                        c.a = pp->a + (float)((cc->a - pp->a) * tf);
+                        c.t = pp->t + (float)((cc->t - pp->t) * tf);
+                        sub[k] = c;
+                    }
+                    m_surfGrid[m] = sub;
+                }
+                flushGridRow(m - 1);
+            }
+            m_surfDataN++;
+        }
+        m_surfPrevRow = std::move(rowFilled);
+        m_surfDataRows.erase(rkey);
+    };
+
+    for (int i = m_meshBuiltCount; i < n; i++) {
+        int kk = m_gridK[i], jj = m_gridJ[i];
+        long long key = ((long long)kk << 32) | (unsigned int)(jj & 0xFFFFFFFFLL);
+        m_meshIdx[key] = i;
+        SurfCell sc;
+        sc.x = m_cloudXYZ[i*3+0]; sc.y = m_cloudXYZ[i*3+1]; sc.z = m_cloudXYZ[i*3+2];
+        sc.a = (float)savedAmpValues[i]; sc.t = (float)savedTofValues[i];
+        long long rkey = ((long long)m_surfPointPass[i] << 32) | (unsigned int)(jj & 0xFFFFFFFFLL);
+        m_surfDataRows[rkey][kk] = sc;
+        m_surfRowCnt[rkey]++;
+        m_surfRowLastSeen[rkey] = i;
+    }
+
+    if (forceTail) {
+        // Finalize every remaining row of the current band (end of drawing).
+        std::vector<long long> tail;
+        for (auto& kv : m_surfRowCnt)
+            if ((int)(kv.first >> 32) == m_meshCurBand) tail.push_back(kv.first);
+        std::sort(tail.begin(), tail.end());
+        for (long long rkey : tail) buildRow(rkey);
+        m_meshBuiltCount = n;
+        if (cur->points) cur->points->Modified();
+        if (cur->cells) cur->cells->Modified();
+        if (cur->cellColors) cur->cellColors->Modified();
+        if (cur->poly) cur->poly->Modified();
+        if (cur->mapper) cur->mapper->Modified();
+        if (cur->cells->GetNumberOfCells() >= kChunkMaxCells) newSurfaceChunk();
+        return;
+    }
+
+    // Find where the new band starts inside this batch (per-point pass index).
+    int switchI = m_meshBuiltCount;
+    while (switchI < n && m_surfPointPass[switchI] == m_meshCurBand) switchI++;
+
+    auto rowReady = [&](long long rkey) -> bool {
+        auto itc = m_surfRowCnt.find(rkey);
+        if (itc == m_surfRowCnt.end() || itc->second < 47) return false;
+        bool full = (itc->second >= 49);
+        bool stale = ((n - 1) - m_surfRowLastSeen[rkey]) >= 150;
+        return full || stale;
+    };
+
+    // Finish the old band's rows inside this batch.
+    for (int i = m_meshBuiltCount; i < switchI; i++) {
+        int jj = m_gridJ[i];
+        long long rkey = ((long long)m_meshCurBand << 32) | (unsigned int)(jj & 0xFFFFFFFFLL);
+        if (!rowReady(rkey)) continue;
+        buildRow(rkey);
+    }
+
+    if (switchI < n) {
+        // Band switch: finish the previous band's remaining rows, then
+        // reset the per-band state before processing the new band's points.
+        std::vector<long long> oldRows;
+        for (auto& kv : m_surfRowCnt)
+            if ((int)(kv.first >> 32) == m_meshCurBand) oldRows.push_back(kv.first);
+        std::sort(oldRows.begin(), oldRows.end());
+        for (long long rkey : oldRows) buildRow(rkey);
+        m_surfGrid.clear();
+        m_meshVertIdx.clear();
+        m_meshPatchDone.clear();
+        m_surfHasPrev = false;
+        m_surfDataN = 0;
+        m_meshCurBand = m_surfPointPass[switchI];
+        qDebug() << "SURF band switch to" << m_meshCurBand;
+    }
+
+    // Build the new band's completed rows.
+    for (int i = switchI; i < n; i++) {
+        int jj = m_gridJ[i];
+        long long rkey = ((long long)m_surfPointPass[i] << 32) | (unsigned int)(jj & 0xFFFFFFFFLL);
+        if (!rowReady(rkey)) continue;
+        buildRow(rkey);
+    }
+    m_meshBuiltCount = n;
+    if (cur->points) cur->points->Modified();
+    if (cur->cells) cur->cells->Modified();
+    if (cur->cellColors) cur->cellColors->Modified();
+    if (cur->poly) cur->poly->Modified();
+    if (cur->mapper) cur->mapper->Modified();
+    if (cur->cells->GetNumberOfCells() >= kChunkMaxCells) newSurfaceChunk();
+}
+
+void MainWindow7::recolorSurfaceMesh()
+{
+    for (auto& ch : m_surfChunks) {
+        if (!ch.cellColors) continue;
+        for (size_t q = 0; q < ch.triA.size(); q++) {
+            unsigned char r, g, bl;
+            GetColorFromValue(isAmpMode ? (double)ch.triA[q] : (double)ch.triT[q], r, g, bl);
+            ch.cellColors->SetTuple3((vtkIdType)q, r, g, bl);
+        }
+        if (ch.cellColors) ch.cellColors->Modified();
+        if (ch.poly) ch.poly->Modified();
+        if (ch.mapper) ch.mapper->Modified();
+    }
+}
 

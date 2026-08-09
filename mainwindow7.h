@@ -23,13 +23,19 @@
 #include <vtkGlyph3D.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkPointData.h>
+#include <vtkCellData.h>
+#include <vtkFloatArray.h>
+#include <vtkPoints.h>
+#include <vtkCellArray.h>
+#include <vtkPolyData.h>
+#include <array>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <QFileDialog>
 #include <QMessageBox>
 
 #include <QString>
-#include <fstream>
-#include <sstream>
 
 #include <vtkPlaneSource.h>
 
@@ -71,7 +77,7 @@ class MainWindow7 : public QMainWindow
 
 public:
     MainWindow7(QWidget *parent = nullptr);
-
+    void autoStartDebug(const QString& csvPath);
     ~MainWindow7();
 
 protected:
@@ -100,6 +106,8 @@ private slots:
 
     void on_pushButton_7_clicked(); // 开始扫描
 
+    void on_pushButton_12_clicked(); // 点云模式
+
 private:
     Ui::MainWindow7 *ui;
 
@@ -114,8 +122,6 @@ private:
     vtkSmartPointer<vtkCellArray> vertices;
     vtkSmartPointer<vtkPolyData> polyData;
     vtkSmartPointer<vtkPolyDataMapper> mapper;
-    // vtkSmartPointer<vtkPointGaussianMapper> mapper;
-    // vtkSmartPointer<vtkOpenGLPolyDataMapper> mapper;
     vtkSmartPointer<vtkAppendPolyData> appendFilter;
     // vtkSmartPointer<vtkActor> actor;
     vtkSmartPointer<vtkVBOActor> vboActor;
@@ -131,6 +137,48 @@ private:
     bool isAmpMode = true;
     std::vector<double> savedAmpValues;
     std::vector<double> savedTofValues;
+    std::vector<int> m_gridK;
+    std::vector<int> m_gridJ;
+    std::vector<int> m_surfPointPass;
+    std::vector<std::array<double, 6>> m_framePose;
+    std::vector<double> m_frameSi;
+    std::vector<int> m_frameBeam;
+    std::vector<double> m_frameLX;
+    std::vector<double> m_frameLY;
+    std::vector<int> m_frameCount;
+    std::vector<float> m_cloudXYZ;
+    bool m_surfaceMode = false;
+    struct SurfChunk {
+        vtkSmartPointer<vtkPolyData> poly;
+        vtkSmartPointer<vtkPolyDataMapper> mapper;
+        vtkSmartPointer<vtkActor> actor;
+        vtkSmartPointer<vtkPoints> points;
+        vtkSmartPointer<vtkCellArray> cells;
+        vtkSmartPointer<vtkUnsignedCharArray> cellColors;
+        std::vector<int> triCloud;
+        std::vector<float> triA;
+        std::vector<float> triT;
+    };
+    std::vector<SurfChunk> m_surfChunks;
+    std::unordered_map<long long, int> m_meshIdx;
+    std::vector<std::array<int, 4>> m_meshQuadVerts;
+    std::unordered_map<long long, int> m_meshVertIdx;
+    std::unordered_set<long long> m_meshPatchDone;
+    struct SurfCell { float x = 0, y = 0, z = 0, a = 0, t = 0; };
+    std::unordered_map<long long, int> m_surfRowCnt;
+    std::unordered_set<long long> m_surfRowDone;
+    std::unordered_map<long long, std::unordered_map<int, SurfCell>> m_surfDataRows;
+    std::unordered_map<int, SurfCell> m_surfPrevRow;
+    bool m_surfHasPrev = false;
+    int m_surfLastDataJ = 0;
+    int m_surfLastDir = 0;
+    bool m_surfDirInit = false;
+    int m_surfDataN = 0;
+    int m_meshCurBand = -1;
+    std::unordered_map<long long, int> m_surfRowLastSeen;
+    std::map<int, std::unordered_map<int, SurfCell>> m_surfGrid;
+    std::vector<int> m_meshTriCloud;
+    int m_meshBuiltCount = -1;
 
     // 空间测量
     bool isMeasuring = false;
@@ -142,12 +190,22 @@ private:
     QThread m_scanThread;
     // 状态
     bool m_isScanning;
+    bool m_drawPaused = false;
     int m_totalFrames;
 
     static const int MAX_POINTS = 10000000; // 最大支持100000
     // CUDA处理器
     CUDAProcessorHandle cudaProcessor = nullptr;
     int frameCount = 0;
+    static const int MAX_BEAM = 64;
+    int cloudValidPoints = 0;
+    double cloudBoundsMin[3] = {0, 0, 0};
+    double cloudBoundsMax[3] = {0, 0, 0};
+    bool cloudBoundsValid = false;
+    bool cameraFitValid = false;
+    qint64 m_lastInteractionMs = 0;
+    double cameraFitMin[3] = {0, 0, 0};
+    double cameraFitMax[3] = {0, 0, 0};
     static const int MAX_POINTS_PER_FRAME = 10000000;  // 添加这行
 
     bool vboRegistered = false;
@@ -161,21 +219,19 @@ private:
     // 当前帧有效点数
     int currentValidPoints = 0;
 
-
-    void initParam();      //初始化参数
     void initWidget();     // 初始化界面
-    void initSlot();       // 初始化信号
     void initVTK();        // 初始化VTK
     void initPointCloud(); // 初始化点云
-    void AddPointCloud(const double pose[], const double amp[], const double tof[], double si, int beam);
-                       // 添加点云
+    void AddPointCloud(const double pose[], const double amp[], const double tof[], double si, int beam, bool renderNow = true, const double* beamZ = nullptr, const float* worldXYZ = nullptr, int worldCount = 0, const int* gridK = nullptr, const int* gridJ = nullptr, int passIndex = 0, double lx = 0, double ly = 0);
     static void onMouseClick(vtkObject *obj, unsigned long event, void *clientData, void *callData); // 鼠标点击
     void pickPoint(int x, int y);   // 测量点
     void GetColorFromValue(double value, unsigned char &r, unsigned char &g, unsigned char &b);
     void renderFrame(const ScanFrame &frame);
-    vtkSmartPointer<vtkPolyData> createFramePolyData(const double pose[], const double amp[], const double tof[], double si, int beam);
     void registerVBOWithCUDA();
-    void setupCustomVBO();
+    void resetPointCloud();
+    void updateSurfaceMesh(int passIndex, bool forceTail = false);
+    void recolorSurfaceMesh();
+    void newSurfaceChunk();
 };
 
 #endif // MAINWINDOW7_H

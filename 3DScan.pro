@@ -4,6 +4,12 @@ greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
 CONFIG += c++17
 CONFIG += force_debug_info
+msvc: QMAKE_CXXFLAGS += /MP
+
+# Force qmake to emit absolute paths in Makefiles. Fixes
+# "dependent '..\..\..\..\..\Qt\...qspinbox.h' does not exist"
+# when the build directory is too deep for relative paths.
+QMAKE_PROJECT_DEPTH = 0
 
 
 # # ============ OpenGL 头文件路径 ============

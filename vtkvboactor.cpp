@@ -3,6 +3,7 @@
 #include <vtkCamera.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkMatrix4x4.h>
+#include <vtkOpenGLFramebufferObject.h>
 #include <QOpenGLContext>
 #include <QDebug>
 
@@ -10,7 +11,8 @@ vtkStandardNewMacro(vtkVBOActor);
 
 vtkVBOActor::vtkVBOActor()
 {
-    this->SetUseBounds(false);
+    // Bounds are provided by SetCloudBounds()/GetBounds(), so the actor is
+    // included in camera framing and clipping-range calculations.
 }
 
 vtkVBOActor::~vtkVBOActor()
@@ -23,6 +25,19 @@ vtkVBOActor::~vtkVBOActor()
             gl->glDeleteVertexArrays(1, &vao);
         }
     }
+}
+
+void vtkVBOActor::SetCloudBounds(double xmin, double xmax, double ymin, double ymax, double zmin, double zmax)
+{
+    cloudBounds[0] = xmin; cloudBounds[1] = xmax;
+    cloudBounds[2] = ymin; cloudBounds[3] = ymax;
+    cloudBounds[4] = zmin; cloudBounds[5] = zmax;
+    cloudBoundsSet = true;
+}
+
+double* vtkVBOActor::GetBounds()
+{
+    return cloudBoundsSet ? cloudBounds : this->Superclass::GetBounds();
 }
 
 bool vtkVBOActor::initGL()
@@ -57,12 +72,11 @@ bool vtkVBOActor::initShaderAndVAO()
         "#version 330 core\n"
         "layout(location = 0) in vec3 position;\n"
         "layout(location = 1) in vec3 color;\n"
-        "uniform mat4 viewMatrix;\n"
-        "uniform mat4 projMatrix;\n"
+        "uniform mat4 mvpMatrix;\n"
         "out vec3 fragColor;\n"
         "void main() {\n"
         "    gl_PointSize = 3.0;\n"
-        "    gl_Position = projMatrix * viewMatrix * vec4(position, 1.0);\n"
+        "    gl_Position = mvpMatrix * vec4(position, 1.0);\n"
         "    fragColor = color;\n"
         "}\n";
 
@@ -148,9 +162,13 @@ bool vtkVBOActor::initShaderAndVAO()
 
 int vtkVBOActor::RenderOpaqueGeometry(vtkViewport* viewport)
 {
-    qDebug() << "[VBOActor] >>>>>>> RENDER OPAQUE ENTRY <<<<<<<";
-
-    // qDebug() << "[VBOActor] RenderOpaqueGeometry called";
+    static bool entryLogged = false;
+    if (!entryLogged) {
+        qDebug() << "[VBOActor] RenderOpaqueGeometry called, valid="
+                 << validPointCount << "vboInit=" << vboInitialized
+                 << "ids=" << vboPointsID << vboColorsID;
+        entryLogged = true;
+    }
 
     vtkRenderer* renderer = vtkRenderer::SafeDownCast(viewport);
     if (!renderer) return 0;
@@ -162,15 +180,9 @@ int vtkVBOActor::RenderOpaqueGeometry(vtkViewport* viewport)
 
 void vtkVBOActor::Render(vtkRenderer* renderer, vtkMapper* mapper)
 {
-    qDebug() << "[VBOActor] >>>>>>> RENDER() CALLED <<<<<<<";
 
     if (!vboInitialized || validPointCount <= 0 ||
         vboPointsID == 0 || vboColorsID == 0) {
-        return;
-    }
-
-    if (!vao || !shaderProgram) {
-        qDebug() << "VAO or shader not initialized!";
         return;
     }
 
@@ -181,43 +193,77 @@ void vtkVBOActor::Render(vtkRenderer* renderer, vtkMapper* mapper)
     renWin->MakeCurrent();
 
     if (!initGL()) return;
+
+    // VTK renders into its render framebuffer object; MakeCurrent() may have
+    // reset the framebuffer binding, so re-bind it before drawing.
+    vtkOpenGLFramebufferObject* fbo = renWin->GetRenderFramebuffer();
+    if (fbo) {
+        fbo->Bind();
+    }
     if (!shaderInitialized) {
         if (!initShaderAndVAO()) return;
+    }
+
+    if (!vao || !shaderProgram) {
+        qDebug() << "VAO or shader not initialized!";
+        return;
     }
 
     // ===== 获取相机矩阵 =====
     vtkCamera* camera = renderer->GetActiveCamera();
     if (!camera) return;
 
-    vtkMatrix4x4* viewMat = camera->GetViewTransformMatrix();
     vtkMatrix4x4* projMat = camera->GetProjectionTransformMatrix(
-        renderer->GetTiledAspectRatio(), 0, 1);
+        renderer->GetTiledAspectRatio(), -1, 1);
+    vtkMatrix4x4* viewMat = camera->GetModelViewTransformMatrix();
 
-    // 转换为 OpenGL 列主序
-    float view[16], proj[16];
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            view[j * 4 + i] = viewMat->GetElement(i, j);
-            proj[j * 4 + i] = projMat->GetElement(i, j);
-        }
+    // Replicate vtkOpenGLCamera::GetKeyMatrices exactly:
+    //   WCVC = transpose(model-view)
+    //   VCDC = transpose(projection)
+    //   WCDC = WCVC * VCDC
+    // then upload the memory directly (matches VTK's own mappers).
+    vtkMatrix4x4* wcvc = vtkMatrix4x4::New();
+    wcvc->DeepCopy(viewMat);
+    wcvc->Transpose();
+    vtkMatrix4x4* vcdc = vtkMatrix4x4::New();
+    vcdc->DeepCopy(projMat);
+    vcdc->Transpose();
+    vtkMatrix4x4* wcdc = vtkMatrix4x4::New();
+    vtkMatrix4x4::Multiply4x4(wcvc, vcdc, wcdc);
+    float mvp[16];
+    for (int i = 0; i < 16; i++) {
+        mvp[i] = static_cast<float>(wcdc->Element[0][i]);
     }
+    wcvc->Delete();
+    vcdc->Delete();
+    wcdc->Delete();
+
 
     // ===== 设置视口 =====
     int* size = renderer->GetSize();
     gl->glViewport(0, 0, size[0], size[1]);
     gl->glEnable(GL_DEPTH_TEST);
+    gl->glEnable(GL_PROGRAM_POINT_SIZE);
 
     // ===== 使用着色器 =====
     gl->glUseProgram(shaderProgram);
 
-    GLint viewLoc = gl->glGetUniformLocation(shaderProgram, "viewMatrix");
-    GLint projLoc = gl->glGetUniformLocation(shaderProgram, "projMatrix");
-    gl->glUniformMatrix4fv(viewLoc, 1, GL_FALSE, view);
-    gl->glUniformMatrix4fv(projLoc, 1, GL_FALSE, proj);
+    GLint mvpLoc = gl->glGetUniformLocation(shaderProgram, "mvpMatrix");
+    gl->glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp);
 
     // ===== 绘制 =====
+    static bool firstDrawLogged = false;
+    if (!firstDrawLogged) {
+        qDebug() << "VBOActor first draw, points:" << validPointCount;
+        firstDrawLogged = true;
+    }
+
     gl->glBindVertexArray(vao);
     gl->glDrawArrays(GL_POINTS, 0, validPointCount);
+    GLenum err = gl->glGetError();
+    if (err != GL_NO_ERROR) {
+        qDebug() << "GL error after draw:" << err;
+    }
     gl->glBindVertexArray(0);
 
     gl->glUseProgram(0);
