@@ -417,7 +417,7 @@ background-color: rgb(0, 138, 200);</string>
        </property>
        <property name="font">
         <font>
-         <pointsize>12</pointsize>
+         <pointsize>14</pointsize>
         </font>
        </property>
       </widget>

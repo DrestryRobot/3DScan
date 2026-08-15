@@ -61,6 +61,8 @@ MainWindow7::MainWindow7(QWidget *parent)
     , cudaProcessor(nullptr)
 {
     ui->setupUi(this);
+    // 统一界面字体大小为 14
+    this->setStyleSheet(QStringLiteral("font-size: 14px;"));
     qRegisterMetaType<ScanFrame>();
 
     initWidget(); // 初始化界面
