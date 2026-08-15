@@ -16,6 +16,7 @@
 // 全局变量声明
 extern double amp[64];
 extern double tof[64];
+extern bool beamValid[64];
 extern double si;
 extern int beam;
 extern double robot_x, robot_y, robot_z;
@@ -129,7 +130,7 @@ private:
                       double ux, double uy, double vx2, double vy2);
     void flushOnlinePack();
     void flushOnlineTail();
-    void insertRowCell(long long k, long long j, float z, float a, float t,
+    void insertRowCell(long long k, long long j, float z, float a, float t, int e,
                        double ux, double uy, double vx2, double vy2);
     void finalizeFilteredRow(long long j);
     void finalizeAllRows();
@@ -169,6 +170,9 @@ private:
     int m_onlinePacked = 0;
     int m_onlineIndex = 0;
     std::deque<double> m_uHist, m_sHist, m_zHist;
+    // 实时模式：以上一帧 IPOC 判断是否有新的硬件帧（机器人 4ms/250Hz）
+    quint32 m_lastIpoc = 0;
+    quint64 m_lastIpocChangeMs = 0;   // 最近一次 IPOC 变化的时间（停滞检测用）
     int m_passDir = 0;
     int m_passFrames = 0;
     double m_passUsum = 0;
@@ -183,9 +187,9 @@ private:
         double uc0, ucS, sc0, scS, zc0, zcS;
         bool turn;
     };
-    struct CandCell { long long k, j; float z, a, t; double d2; };
+    struct CandCell { long long k, j; float z, a, t; double d2; int e = -1; };
     bool m_pass0RefFrozen = false;
-    struct RowCell { float z, a, t; };
+    struct RowCell { float z, a, t; int e = -1; };
     struct RowBuf {
         std::map<long long, RowCell> cells;  // k -> cell
         bool done = false;

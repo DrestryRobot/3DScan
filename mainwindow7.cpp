@@ -2,6 +2,7 @@
 #include "ui_mainwindow7.h"
 #include <QFile>
 #include <QTextStream>
+#include <QTime>
 #include <vtkCullerCollection.h>
 
 // 全局变量声明
@@ -77,8 +78,21 @@ MainWindow7::MainWindow7(QWidget *parent)
         m_isScanning = false;
         m_drawPaused = false;
         ui->pushButton_7->setText("开始扫描");
+        // 扫描自然结束时停止计时
+        if (m_scanTimeRunning) {
+            m_scanElapsedMs += m_scanTimer.elapsed();
+            m_scanTimeRunning = false;
+        }
+        // 调试：扫描结束后输出网格带结构，检查带间是否有空隙
+        dumpGridStats();
     });
     m_scanThread.start();
+
+    // 每秒刷新左上角叠加层：数据帧率 / 渲染帧率 / 扫描时间 / 点云点数
+    m_overlayTimer = new QTimer(this);
+    m_overlayTimer->setInterval(1000);
+    connect(m_overlayTimer, &QTimer::timeout, this, &MainWindow7::updateOverlay);
+    m_overlayTimer->start();
 
     // 延迟注册 VBO (等待 OpenGL 上下文就绪)
     QTimer::singleShot(200, this, &MainWindow7::registerVBOWithCUDA);
@@ -95,6 +109,10 @@ void MainWindow7::autoStartDebug(const QString& csvPath)
     connect(m_scan, &Scan::newFrameAvailable, this, &MainWindow7::renderFrame);
     QMetaObject::invokeMethod(m_scan, [this]() { m_scan->start(); }, Qt::QueuedConnection);
     m_isScanning = true;
+    // 自动调试启动：重新计时
+    m_scanElapsedMs = 0;
+    m_scanTimer.restart();
+    m_scanTimeRunning = true;
     qDebug() << "autoStartDebug started";
     QTimer::singleShot(10000, this, [this]() { on_pushButton_12_clicked(); });
     QTimer::singleShot(25000, this, [this]() {
@@ -164,6 +182,10 @@ bool MainWindow7::eventFilter(QObject *obj, QEvent *event)
         return true;
     }
 
+    if (obj == ui->vtkWidget && (event->type() == QEvent::Resize || event->type() == QEvent::Move)) {
+        positionOverlayLabel();
+    }
+
     return QMainWindow::eventFilter(obj, event);
 }
 
@@ -215,6 +237,27 @@ void MainWindow7::initVTK()
     interactionCallback->SetClientData(this);
     interactor->AddObserver(vtkCommand::InteractionEvent, interactionCallback);
 
+    // 交互（旋转/缩放/平移）时点云降采样，松开后恢复全量，解决大点云卡顿
+    vtkSmartPointer<vtkCallbackCommand> startInteract = vtkSmartPointer<vtkCallbackCommand>::New();
+    startInteract->SetCallback([](vtkObject*, unsigned long, void* cd, void*) {
+        MainWindow7* self = static_cast<MainWindow7*>(cd);
+        if (self->vboActor && self->cloudValidPoints > 20000) {
+            // 交互时抽稀显示，但保持整片点云覆盖，而不是只画前 1/3 个点
+            self->vboActor->SetDisplayStride(3);
+        }
+    });
+    startInteract->SetClientData(this);
+    interactor->AddObserver(vtkCommand::StartInteractionEvent, startInteract);
+
+    vtkSmartPointer<vtkCallbackCommand> endInteract = vtkSmartPointer<vtkCallbackCommand>::New();
+    endInteract->SetCallback([](vtkObject*, unsigned long, void* cd, void*) {
+        MainWindow7* self = static_cast<MainWindow7*>(cd);
+        if (self->vboActor)
+            self->vboActor->SetDisplayStride(1);
+    });
+    endInteract->SetClientData(this);
+    interactor->AddObserver(vtkCommand::EndInteractionEvent, endInteract);
+
     // 第一个点标记（红色）
     vtkSmartPointer<vtkSphereSource> sphere1 = vtkSmartPointer<vtkSphereSource>::New();
     sphere1->SetRadius(0.5);
@@ -253,6 +296,20 @@ void MainWindow7::initVTK()
     lightKit->SetKeyLightIntensity(5);
     lightKit->AddLightsToRenderer(renderer);
     renderer->SetAmbient(0.5, 0.5, 0.5);
+
+    // 左上角实时状态叠加层（Qt UI 控件，悬浮在 VTK 窗口之上，不参与鼠标事件）
+    m_overlayLabel = new QLabel(ui->vtkWidget->parentWidget());
+    m_overlayLabel->setObjectName("overlayLabel");
+    m_overlayLabel->setStyleSheet("background-color: rgba(0, 0, 0, 150);"
+                                  " color: rgb(255, 255, 0);"
+                                  " padding: 6px 10px;"
+                                  " border-radius: 4px;"
+                                  " font-size: 14px;");
+    m_overlayLabel->setText("数据帧率: 0 fps\n渲染帧率: 0 fps\n扫描时间: 00:00:00\n点云点数: 0");
+    m_overlayLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_overlayLabel->show();
+    ui->vtkWidget->installEventFilter(this);
+    positionOverlayLabel();
 
     renderer->ResetCamera();
 
@@ -351,10 +408,12 @@ void MainWindow7::registerVBOWithCUDA()
     if (result == 0) {
         qDebug() << "VBO registered to CUDA successfully!";
         vboInitialized = true;
+        vboRegistered = true;   // 置位：AMP/TOF 切换时才能对已有点云整体重着色
         setColorLUT(cudaProcessor, color_Amplitude, 256);
         cloudValidPoints = 0;
     } else {
         qDebug() << "Failed to register VBO to CUDA";
+        vboRegistered = false;
         delete vboPoints;
         vboPoints = nullptr;
         delete vboColors;
@@ -453,6 +512,12 @@ void MainWindow7::AddPointCloud(const double pose[], const double amp[],
 
         vboActor->SetVBOIDs(vboPoints->bufferId(), vboColors->bufferId());
         vboActor->SetValidPointCount(cloudValidPoints);
+        // 显示抽稀：点云超过显示预算时，只绘制下标为 stride 倍数的点，
+        // 数据完整保留在 VBO/内存里，仅控制每帧绘制量，保证渲染帧率稳定。
+        // 步长取 2 的幂且只增不减，避免抽稀图案在云增长时跳动。
+        while (cloudValidPoints / m_displayStride > 1200000 && m_displayStride < 64)
+            m_displayStride *= 2;
+        vboActor->SetDisplayStride(m_displayStride);
         vboActor->SetVBOInitialized(true);
 
         { // auto-fit camera to the growing cloud (throttled)
@@ -500,6 +565,7 @@ void MainWindow7::AddPointCloud(const double pose[], const double amp[],
 void MainWindow7::resetPointCloud()
 {
     cloudValidPoints = 0;
+    m_displayStride = 1;
     cloudBoundsValid = false;
     cameraFitValid = false;
     savedAmpValues.clear();
@@ -525,6 +591,7 @@ void MainWindow7::resetPointCloud()
     m_surfRowDone.clear();
     m_surfPrevRow.clear();
     m_surfHasPrev = false;
+    m_surfPrevKey = -1;
     m_surfLastDataJ = 0;
     m_surfLastDir = 0;
     m_surfDirInit = false;
@@ -558,41 +625,76 @@ void MainWindow7::renderFrame(const ScanFrame& frame)
                         frame.passIndex, frame.lx, frame.ly);
     {
         static int sTick = 0;
-        if (++sTick % 10 == 0) updateSurfaceMesh(frame.passIndex);
+        // 降低曲面网格重建频率，减轻 GUI 线程负载（约 5 次/秒）
+        if (++sTick % 40 == 0) updateSurfaceMesh(frame.passIndex);
     }
 
-    static int renderCount = 0;
-    static QElapsedTimer renderTimer;
-    if (!renderTimer.isValid()) {
-        renderTimer.start();
+    // 统计每秒收到的数据帧数与实际渲染帧数（左上角叠加层每秒读取并清零）
+    m_guiFrames++;
+    if (renderNow) m_renderCount++;
+
+    // 保存最新一帧关键信息，供叠加层/UI 行每秒刷新
+    m_lastIpoc = frame.ipoc;
+    m_lastSi = frame.si;
+    m_lastBeam = frame.beam;
+    m_lastAmp0 = frame.amp[0];
+    m_lastTof0 = frame.tof[0];
+    for (int k = 0; k < 6; k++) m_lastPose[k] = frame.pose[k];
+}
+
+// 每秒刷新左上角叠加层与 UI 数据行
+void MainWindow7::updateOverlay()
+{
+    int guiFrames = m_guiFrames;
+    int renderFps = m_renderCount;
+    m_guiFrames = 0;
+    m_renderCount = 0;
+    qDebug() << "[PointCloud] GUI收到帧:" << guiFrames
+             << " 渲染帧率:" << renderFps << "fps"
+             << " 点云点数:" << cloudValidPoints
+             << " 保存点数:" << savedAmpValues.size();
+
+    if (m_overlayLabel) {
+        qint64 scanMs = m_scanElapsedMs + (m_scanTimeRunning ? m_scanTimer.elapsed() : 0);
+        QString scanTime = QTime::fromMSecsSinceStartOfDay(scanMs).toString("hh:mm:ss");
+        QString fpsText = QString("数据帧率: %1 fps\n渲染帧率: %2 fps\n扫描时间: %3\n点云点数: %4")
+                              .arg(guiFrames)
+                              .arg(renderFps)
+                              .arg(scanTime)
+                              .arg(cloudValidPoints);
+        m_overlayLabel->setText(fpsText);
+        positionOverlayLabel();
     }
 
-    if (renderNow) renderCount++;
-    if (renderTimer.elapsed() >= 1000) {
-        double renderFps = renderCount;
-        qDebug() << "渲染帧率:" << renderFps << "fps";
-        renderCount = 0;
-        renderTimer.restart();
+    // 打印实时数据到 UI（最新一帧）
+    QString text = QString("Frame: %1 SI: %2 Beam: %3 "
+                           "Pose: %4 %5 %6 %7 %8 %9 "
+                           "AMP[0]: %10 TOF[0]: %11")
+                       .arg(m_lastIpoc)
+                       .arg(m_lastSi, 0, 'f', 2)
+                       .arg(m_lastBeam)
+                       .arg(m_lastPose[0], 0, 'f', 2)
+                       .arg(m_lastPose[1], 0, 'f', 2)
+                       .arg(m_lastPose[2], 0, 'f', 2)
+                       .arg(m_lastPose[3], 0, 'f', 2)
+                       .arg(m_lastPose[4], 0, 'f', 2)
+                       .arg(m_lastPose[5], 0, 'f', 2)
+                       .arg(m_lastAmp0, 0, 'f', 2)
+                       .arg(m_lastTof0, 0, 'f', 2);
+    ui->lineEdit->setText(text);
+    ui->lineEdit->setCursorPosition(0);
+}
 
-        // 打印实时数据到 UI
-        QString text = QString("Frame: %1 SI: %2 Beam: %3 "
-                               "Pose: %4 %5 %6 %7 %8 %9 "
-                               "AMP[0]: %10 TOF[0]: %11")
-                           .arg(frame.ipoc)
-                           .arg(frame.si, 0, 'f', 2)   // 两位小数
-                           .arg(frame.beam)
-                           .arg(frame.pose[0], 0, 'f', 2)
-                           .arg(frame.pose[1], 0, 'f', 2)
-                           .arg(frame.pose[2], 0, 'f', 2)
-                           .arg(frame.pose[3], 0, 'f', 2)
-                           .arg(frame.pose[4], 0, 'f', 2)
-                           .arg(frame.pose[5], 0, 'f', 2)
-                           .arg(frame.amp[0], 0, 'f', 2)
-                           .arg(frame.tof[0], 0, 'f', 2);
-
-        ui->lineEdit->setText(text);
-        ui->lineEdit->setCursorPosition(0);
-    }
+// 将叠加层定位到 VTK 窗口左上角
+void MainWindow7::positionOverlayLabel()
+{
+    if (!m_overlayLabel || !ui->vtkWidget) return;
+    QWidget* host = ui->vtkWidget->parentWidget();
+    if (!host) return;
+    m_overlayLabel->adjustSize();
+    QPoint topLeft = ui->vtkWidget->mapTo(host, QPoint(0, 0));
+    m_overlayLabel->move(topLeft + QPoint(8, 8));
+    m_overlayLabel->raise();
 }
 
 void MainWindow7::onMouseClick(vtkObject* obj, unsigned long, void* clientData, void*)
@@ -694,8 +796,16 @@ void MainWindow7::on_pushButton_clicked()
         m_isScanning = true;
         ui->pushButton_7->setText("停止扫描");
         qDebug() << "Scan started for rendering";
+        // 扫描计时：全新开始清零，暂停后续扫不清零
+        if (!m_drawPaused) m_scanElapsedMs = 0;
+        m_scanTimer.restart();
+        m_scanTimeRunning = true;
     } else {
         qDebug() << "Drawing connected (scan already running)";
+        if (!m_scanTimeRunning) {
+            m_scanTimer.restart();
+            m_scanTimeRunning = true;
+        }
     }
     m_drawPaused = false;
 }
@@ -709,6 +819,11 @@ void MainWindow7::on_pushButton_2_clicked()
         m_drawPaused = true;
         ui->pushButton_7->setText("开始扫描");
         qDebug() << "Drawing paused";
+        // 暂停时冻结扫描时间
+        if (m_scanTimeRunning) {
+            m_scanElapsedMs += m_scanTimer.elapsed();
+            m_scanTimeRunning = false;
+        }
     }
 }
 
@@ -721,6 +836,11 @@ void MainWindow7::on_pushButton_3_clicked()
         m_drawPaused = false;
         ui->pushButton_7->setText("开始扫描");
     }
+    // 结束绘制时停止计时
+    if (m_scanTimeRunning) {
+        m_scanElapsedMs += m_scanTimer.elapsed();
+        m_scanTimeRunning = false;
+    }
     // 收尾剩余行，形成完整曲面
     updateSurfaceMesh(m_meshCurBand, true);
     renderWindow->Render();
@@ -729,6 +849,60 @@ void MainWindow7::on_pushButton_3_clicked()
         renderWindow->Render();
     });
     qDebug() << "Drawing finished";
+}
+
+// SoundScan 扫描控制链接入口
+void MainWindow7::startDrawing()
+{
+    on_pushButton_clicked();
+}
+
+void MainWindow7::pauseDrawing()
+{
+    on_pushButton_2_clicked();
+}
+
+void MainWindow7::finishDrawing()
+{
+    on_pushButton_3_clicked();
+}
+
+// 调试：输出点云网格的带(k)/行(j)结构，定位带间空隙
+void MainWindow7::dumpGridStats()
+{
+    int n = (int)m_gridK.size();
+    if (n == 0 || (int)m_surfPointPass.size() < n || (int)m_gridJ.size() < n) {
+        qDebug() << "[GridStats] 无网格数据";
+        return;
+    }
+    int maxPass = 0;
+    for (int i = 0; i < n; i++) {
+        if (m_surfPointPass[i] > maxPass) maxPass = m_surfPointPass[i];
+    }
+    qDebug() << "[GridStats] 总点数:" << n << " 带数:" << (maxPass + 1);
+    for (int p = 0; p <= maxPass; p++) {
+        long long minK = 0, maxK = 0, minJ = 0, maxJ = 0;
+        int cnt = 0;
+        bool first = true;
+        for (int i = 0; i < n; i++) {
+            if (m_surfPointPass[i] != p) continue;
+            long long k = m_gridK[i];
+            long long j = m_gridJ[i];
+            if (first) {
+                minK = maxK = k;
+                minJ = maxJ = j;
+                first = false;
+            } else {
+                if (k < minK) minK = k;
+                if (k > maxK) maxK = k;
+                if (j < minJ) minJ = j;
+                if (j > maxJ) maxJ = j;
+            }
+            cnt++;
+        }
+        qDebug() << "[GridStats] 带" << p << ": k=[" << minK << "," << maxK << "]"
+                 << " j=[" << minJ << "," << maxJ << "] 点数:" << cnt;
+    }
 }
 
 // 保存数据
@@ -978,19 +1152,24 @@ void MainWindow7::on_pushButton_4_clicked()
 // 数据模式
 void MainWindow7::on_pushButton_8_clicked()
 {
+    // 先切换模式，保证点云(VBO)和曲面网格使用同一个新模式
+    isAmpMode = !isAmpMode;
+
     // switch AMP/TOF color mode for the whole accumulated cloud
-    const std::vector<double>& src = isAmpMode ? savedTofValues : savedAmpValues;
+    const std::vector<double>& src = isAmpMode ? savedAmpValues : savedTofValues;
     int n = (int)src.size();
     if (n > cloudValidPoints) n = cloudValidPoints;
 
     if (n > 0 && cudaProcessor && vboRegistered) {
         std::vector<float> values(n);
         for (int i = 0; i < n; i++) values[i] = (float)src[i];
-        recolorVBO(cudaProcessor, values.data(), n);
+        ui->vtkWidget->makeCurrent();
+        int rc = recolorVBO(cudaProcessor, values.data(), n);
+        ui->vtkWidget->doneCurrent();
+        qDebug() << "recolorVBO rc:" << rc << " points:" << n;
     }
 
     recolorSurfaceMesh();
-    isAmpMode = !isAmpMode;
     ui->pushButton_8->setText(isAmpMode ? "TOF\u6a21\u5f0f" : "AMP\u6a21\u5f0f");
 
     renderWindow->Render();
@@ -1350,10 +1529,26 @@ void MainWindow7::updateSurfaceMesh(int passIndex, bool forceTail)
             rowFilled = row;
         }
 
-        if (!m_surfHasPrev) {
+        // 只有“同一道(pass)且 j 连续相邻”的行才能插值连接；
+        // 跨道、跳行或数据缺口时断开另起一段，避免生成点云中
+        // 不存在的悬空桥接带。
+        long long curKey = rkey;
+        int curJ = (int)(curKey & 0xFFFFFFFFLL);
+        int prevJ = (int)(m_surfPrevKey & 0xFFFFFFFFLL);
+        bool adjacent = m_surfHasPrev &&
+                        (curKey >> 32) == (m_surfPrevKey >> 32) &&
+                        (curJ == prevJ + 1 || curJ == prevJ - 1);
+
+        if (!adjacent) {
+            m_surfGrid.clear();
+            m_meshVertIdx.clear();
+            m_meshPatchDone.clear();
             m_surfGrid[0] = rowFilled;
             m_surfHasPrev = true;
             m_surfDataN = 0;
+            qDebug() << "SURF segment break at j=" << curJ
+                     << " prevJ=" << (m_surfHasPrev ? prevJ : -1)
+                     << " pass=" << (int)(curKey >> 32);
         } else {
             const std::unordered_map<int, SurfCell>& prev = m_surfPrevRow;
             int prevMin = prev.begin()->first, prevMax = prevMin;
@@ -1399,6 +1594,7 @@ void MainWindow7::updateSurfaceMesh(int passIndex, bool forceTail)
             }
             m_surfDataN++;
         }
+        m_surfPrevKey = rkey;
         m_surfPrevRow = std::move(rowFilled);
         m_surfDataRows.erase(rkey);
     };
@@ -1465,6 +1661,7 @@ void MainWindow7::updateSurfaceMesh(int passIndex, bool forceTail)
         m_meshVertIdx.clear();
         m_meshPatchDone.clear();
         m_surfHasPrev = false;
+        m_surfPrevKey = -1;
         m_surfDataN = 0;
         m_meshCurBand = m_surfPointPass[switchI];
         qDebug() << "SURF band switch to" << m_meshCurBand;

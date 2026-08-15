@@ -19,6 +19,11 @@ public:
     void SetCUDAProcessor(CUDAProcessorHandle handle) { cudaHandle = handle; }
     void SetVBOInitialized(bool initialized) { vboInitialized = initialized; }
     void SetValidPointCount(int count) { validPointCount = count; }
+    // 显示抽稀步长：只绘制下标为 stride 倍数的点，用于大点云下保持渲染帧率
+    void SetDisplayStride(int stride)
+    {
+        displayStride = (stride > 1) ? stride : 1;
+    }
     void SetVBOIDs(unsigned int pointsID, unsigned int colorsID)
     {
         vboPointsID = pointsID;
@@ -40,6 +45,7 @@ private:
     bool cloudBoundsSet = false;
     bool vboInitialized = false;
     int validPointCount = 0;
+    int displayStride = 1;
 
     unsigned int vboPointsID = 0;
     unsigned int vboColorsID = 0;

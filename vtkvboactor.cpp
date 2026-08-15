@@ -73,9 +73,15 @@ bool vtkVBOActor::initShaderAndVAO()
         "layout(location = 0) in vec3 position;\n"
         "layout(location = 1) in vec3 color;\n"
         "uniform mat4 mvpMatrix;\n"
+        "uniform int u_stride;\n"
         "out vec3 fragColor;\n"
         "void main() {\n"
         "    gl_PointSize = 3.0;\n"
+        "    if (u_stride > 1 && (gl_VertexID % u_stride) != 0) {\n"
+        "        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n"
+        "        fragColor = color;\n"
+        "        return;\n"
+        "    }\n"
         "    gl_Position = mvpMatrix * vec4(position, 1.0);\n"
         "    fragColor = color;\n"
         "}\n";
@@ -250,6 +256,8 @@ void vtkVBOActor::Render(vtkRenderer* renderer, vtkMapper* mapper)
 
     GLint mvpLoc = gl->glGetUniformLocation(shaderProgram, "mvpMatrix");
     gl->glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp);
+    GLint strideLoc = gl->glGetUniformLocation(shaderProgram, "u_stride");
+    gl->glUniform1i(strideLoc, displayStride);
 
     // ===== 绘制 =====
     static bool firstDrawLogged = false;

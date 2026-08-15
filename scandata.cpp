@@ -3,6 +3,7 @@
 // 超声采集数据
 double amp[64] = {0};
 double tof[64] = {0};
+bool beamValid[64] = { false };
 double si = 0.0;
 int beam = 49;                     // 与 3DScan 默认波束数一致
 

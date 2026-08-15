@@ -20,6 +20,7 @@
 // ---- 超声采集数据（每帧最多 64 波束）----
 extern double amp[64];
 extern double tof[64];
+extern bool beamValid[64];
 extern double si;
 extern int beam;
 

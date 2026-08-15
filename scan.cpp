@@ -2,6 +2,7 @@
 #include "Scan.h"
 #include <QDebug>
 #include <QFile>
+#include <QDateTime>
 #include <QTextStream>
 #include <QElapsedTimer>
 #include <unordered_map>
@@ -9,17 +10,8 @@
 #include <algorithm>
 
 // ============================================
-// 全局变量定义
+// 全局变量定义统一放在 scandata.cpp（scandata.h 提供 extern 声明）
 // ============================================
-double amp[64] = {0};
-double tof[64] = {0};
-double si = 0.0;
-int beam = 49;
-double robot_x = 0, robot_y = 0, robot_z = 0;
-double robot_a = 0, robot_b = 0, robot_c = 0;
-quint32 robot_ipoc = 0;
-double longmen[2] = {0, 0};
-bool m_start = false;
 
 // ============================================
 // Frame offset between the AMP/TOF channel and the robot pose.
@@ -711,6 +703,7 @@ void Scan::updateGlobalVariables(const std::vector<std::string>& cells)
 
             amp[i] = (ampIndex < (int)cells.size()) ? safe_stod(cells[ampIndex], 0.0) : 0.0;
             tof[i] = (tofIndex < (int)cells.size()) ? safe_stod(cells[tofIndex], 0.0) : 0.0;
+            beamValid[i] = true;
         }
     }
 
@@ -888,32 +881,67 @@ void Scan::sendNextFrame()
         return;
     }
 
-    // 更新全局变量
-    // Simulate a real 250 Hz data source: read and parse the next frame from
-    // the file on every timer tick, instead of replaying from memory.
-    std::string line;
-    std::vector<std::string> cells;
-    bool gotFrame = false;
-    while (std::getline(m_dataStream, line)) {
-        cells = parseCSVLine(line);
-        if (!cells.empty() && cells.size() > 10) { gotFrame = true; break; }
+    // 数据源：CSV 回放 或 实时全局量（scandata）
+    if (m_dataStream.is_open()) {
+        // CSV 回放：读下一行
+        std::string line;
+        std::vector<std::string> cells;
+        bool gotFrame = false;
+        while (std::getline(m_dataStream, line)) {
+            cells = parseCSVLine(line);
+            if (!cells.empty() && cells.size() > 10) { gotFrame = true; break; }
+        }
+        if (!gotFrame) {
+            if (m_onlineGridEnabled) {
+                if (!m_win.empty() || !m_rowBuf.empty() || m_onlinePacked > 0) {
+                    flushOnlineTail();
+                    qDebug() << "Online grid flushed, cells:" << m_onlineCells.size();
+                }
+            }
+            m_timer->stop();
+            m_isRunning = false;
+            m_start = false;
+            m_paused = false;
+            emit finished();
+            qDebug() << "Playback finished";
+            return;
+        }
+        updateGlobalVariables(cells);
     }
-    if (!gotFrame) {
-        if (m_onlineGridEnabled) {
-            if (!m_win.empty() || !m_rowBuf.empty() || m_onlinePacked > 0) {
-                flushOnlineTail();
-                qDebug() << "Online grid flushed, cells:" << m_onlineCells.size();
+    // 实时模式：全局量由 udpserver（机器人 250Hz/IPOC）和 ViewModel（超声 180Hz）
+    // 实时写入。以机器人 IPOC 为硬件时间戳：IPOC 未变化就跳过本 tick。
+    if (!m_dataStream.is_open()) {
+        static int rtTicks = 0;
+        static QElapsedTimer rtTimer;
+        if (!rtTimer.isValid())
+            rtTimer.start();
+        rtTicks++;
+        if (rtTimer.elapsed() >= 1000) {
+            qDebug() << "[Scan] 实时轮询:" << rtTicks
+                     << " robot_ipoc:" << robot_ipoc
+                     << " amp[0]:" << amp[0] << " tof[0]:" << tof[0]
+                     << " si:" << si << " beam:" << beam;
+            rtTicks = 0;
+            rtTimer.restart();
+        }
+    }
+    if (!m_dataStream.is_open() && robot_ipoc == m_lastIpoc) {
+        // 停滞检测：实时扫描中 IPOC 长时间不变化，说明机器人数据被阻塞/卡死
+        quint64 nowMs = (quint64)QDateTime::currentMSecsSinceEpoch();
+        if (m_lastIpocChangeMs != 0 && nowMs - m_lastIpocChangeMs > 500) {
+            static quint64 lastStallWarnMs = 0;
+            if (nowMs - lastStallWarnMs >= 1000) {
+                lastStallWarnMs = nowMs;
+                qDebug() << "[Scan] IPOC停滞警告: 已" << (nowMs - m_lastIpocChangeMs)
+                         << "ms 未变化, robot_ipoc=" << robot_ipoc;
             }
         }
-        m_timer->stop();
-        m_isRunning = false;
-        m_start = false;
-        m_paused = false;
-        emit finished();
-        qDebug() << "Playback finished";
         return;
     }
-    updateGlobalVariables(cells);
+    if (!m_dataStream.is_open()) {
+        m_lastIpoc = robot_ipoc;
+        m_lastIpocChangeMs = (quint64)QDateTime::currentMSecsSinceEpoch();
+    }
     computeBeamDepthOnline();
     m_currentIndex++;
 
@@ -992,7 +1020,7 @@ void Scan::sendNextFrame()
         if (dir != 0 && dir == m_candDir) m_candDirCnt++;
         else { m_candDir = dir; m_candDirCnt = (dir != 0) ? 1 : 0; }
         if (dir != 0 && m_candDirCnt >= kPassHystFrames && m_passDir != 0 && dir != m_passDir
-            && m_currentIndex - m_lastFlipFrame >= 300) {
+            && m_currentIndex - m_lastFlipFrame >= 60) {
             if (!m_pass0RefFrozen && m_passUcnt > 0) {
                 m_pass0Ref = m_passUsum / m_passUcnt;
                 m_pass0RefFrozen = true;
@@ -1121,9 +1149,11 @@ void Scan::processFrameOnline(const FrameRecord& rec, const PassFrameMeta& meta,
             if (fabs(du) > 2.0)
                 m_passStepSign = (du < 0) ? -1 : 1;
         }
-        uRef = (m_passStepSign != 0)
-            ? (m_pass0Ref + m_passStepSign * (double)m_passIndex * 14.4)
-            : meta.ucS;
+        if (m_passStepSign != 0) {
+            uRef = m_pass0Ref + m_passStepSign * (double)m_passIndex * 14.4;
+        } else {
+            uRef = meta.ucS;
+        }
     }
 
     // Nearest-cell candidates of this frame (49 elements -> 49 cells).
@@ -1138,7 +1168,17 @@ void Scan::processFrameOnline(const FrameRecord& rec, const PassFrameMeta& meta,
     // to 46..47 columns; using the along-array distance keeps the full
     // 49 columns (14.4 mm) so adjacent path strips tile without gaps.
     const long long kc = (long long)floor(uRef / 0.3);
+    // 调试：每秒打印一次带参考值，确认换向后 uRef 是否被冻结
+    static int refLogCount = 0;
+    if (++refLogCount % 250 == 0) {
+        qDebug() << "[Ref] passIndex=" << m_passIndex
+                 << " passStepSign=" << m_passStepSign
+                 << " pass0Ref=" << m_pass0Ref
+                 << " uRef=" << uRef << " kc=" << kc
+                 << " ucS=" << meta.ucS;
+    }
     for (int e = 0; e < 49; e++) {
+        if (!beamValid[e]) continue;  // 板外波束不进入在线网格
         double px = rec.xyz[e*3+0];
         double py = rec.xyz[e*3+1];
         double pz = rec.xyz[e*3+2];
@@ -1155,6 +1195,7 @@ void Scan::processFrameOnline(const FrameRecord& rec, const PassFrameMeta& meta,
         cc.k = k; cc.j = j;
         cc.z = (float)zs; cc.a = col.amp[e]; cc.t = col.tof[e];
         cc.d2 = d2;
+        cc.e = e;
         auto it = cmap.find(key);
         if (it == cmap.end() || d2 < it->second.d2) cmap[key] = cc;
     }
@@ -1172,7 +1213,8 @@ void Scan::processFrameOnline(const FrameRecord& rec, const PassFrameMeta& meta,
                 auto it = wm.find(kv.first);
                 if (it != wm.end() && it->second.d2 < best.d2) best = it->second;
             }
-            insertRowCell(best.k, best.j, best.z, best.a, best.t, ux, uy, vx2, vy2);
+            if (best.e >= 0 && !beamValid[best.e]) continue;  // 板外波束丢弃，清除窗口拖尾
+            insertRowCell(best.k, best.j, best.z, best.a, best.t, best.e, ux, uy, vx2, vy2);
         }
     }
 
@@ -1187,9 +1229,10 @@ void Scan::processFrameOnline(const FrameRecord& rec, const PassFrameMeta& meta,
     }
 }
 
-void Scan::insertRowCell(long long k, long long j, float z, float a, float t,
+void Scan::insertRowCell(long long k, long long j, float z, float a, float t, int e,
                          double ux, double uy, double vx2, double vy2)
 {
+    if (e >= 0 && !beamValid[e]) return;  // 延迟进入行缓存的板外波束直接丢弃
     if (!m_rowBufActive) {
         m_rowBufActive = true;
         m_bandDirFwd = true;
@@ -1201,7 +1244,7 @@ void Scan::insertRowCell(long long k, long long j, float z, float a, float t,
         emitGridCell(k, j, z, a, t, ux, uy, vx2, vy2);
         return;
     }
-    m_rowBuf[j].cells[k] = RowCell{z, a, t};
+    m_rowBuf[j].cells[k] = RowCell{z, a, t, e};
 
     if (m_bandDirFwd) {
         while (m_nextFinalizeJ <= j - m_filterWin) {
@@ -1246,6 +1289,7 @@ void Scan::finalizeFilteredRow(long long j)
     for (auto& kv : rb.cells) {
         long long k = kv.first;
         const RowCell& c = kv.second;
+        if (c.e >= 0 && !beamValid[c.e]) continue;  // 板外波束不发射
         // 2D ????????? k??? j ? ?W???? AMP/TOF ???z ???
         float a = c.a, t = c.t;
         // 小噪点支持度抑制：3x3 原始值中位数作背景，
@@ -1319,8 +1363,27 @@ void Scan::finalizeAllRows()
 void Scan::emitGridCell(long long k, long long j, float z, float a, float t,
                         double ux, double uy, double vx2, double vy2)
 {
+    // 调试：每秒统计网格单元发射/去重数量
+    static int emitCells = 0;
+    static int dupCells = 0;
+    static QElapsedTimer cellTimer;
+    if (!cellTimer.isValid())
+        cellTimer.start();
+    emitCells++;
+    if (cellTimer.elapsed() >= 1000) {
+        qDebug() << "[Grid] 单元发射:" << emitCells
+                 << " 去重跳过:" << dupCells
+                 << " 在线单元总数:" << m_onlineCells.size();
+        emitCells = 0;
+        dupCells = 0;
+        cellTimer.restart();
+    }
+
     long long key = (k << 32) | (unsigned int)(j & 0xFFFFFFFFLL);
-    if (m_onlineCells.find(key) != m_onlineCells.end()) return;
+    if (m_onlineCells.find(key) != m_onlineCells.end()) {
+        dupCells++;
+        return;
+    }
     OnlineCell c; c.z = z; c.amp = a; c.tof = t;
     m_onlineCells.emplace(key, c);
     if (m_onlinePacked == 49) flushOnlinePack();
@@ -1343,7 +1406,8 @@ void Scan::flushOnlinePack()
     m_onlineOut.push_back(m_onlineGf);
     const GridFrame& g = m_onlineOut.back();
     ScanFrame f;
-    f.ipoc = (quint32)(m_onlineIndex + 1);
+    // 以机器人 IPOC 作为硬件时间戳（实时渲染按 IPOC 对齐）
+    f.ipoc = robot_ipoc;
     f.si = si;
     // TCP pose (undo the LX/LY transducer offset so the file matches
     // the imported CSV format and can be re-imported).
@@ -1399,7 +1463,8 @@ void Scan::flushOnlineTail()
                 auto it = wm.find(kv.first);
                 if (it != wm.end() && it->second.d2 < best.d2) best = it->second;
             }
-            insertRowCell(best.k, best.j, best.z, best.a, best.t, ux, uy, vx2, vy2);
+            if (best.e >= 0 && !beamValid[best.e]) continue;
+            insertRowCell(best.k, best.j, best.z, best.a, best.t, best.e, ux, uy, vx2, vy2);
         }
     }
     finalizeAllRows();
@@ -1414,7 +1479,7 @@ void Scan::flushOnlineTail()
 // ============================================
 void Scan::start()
 {
-    if (m_isRunning || m_csvPath.empty()) {
+    if (m_isRunning) {
         return;
     }
 
@@ -1423,7 +1488,10 @@ void Scan::start()
         m_isRunning = true;
         m_paused = false;
         m_start = true;
-        m_timer->start(4);
+        if (m_dataStream.is_open())
+            m_timer->start(4);   // CSV 回放：250Hz 定时器
+        else
+            m_timer->start(1);   // 实时模式：1ms 轮询 IPOC，保证不漏硬件时间戳
         qDebug() << "Scan resumed at frame" << m_currentIndex;
         return;
     }
@@ -1468,19 +1536,28 @@ void Scan::start()
     m_isRunning = true;
     m_currentIndex = 0;
     m_gridIndex = 0;
-    robot_ipoc = 0;
+    m_lastIpoc = 0;
     m_start = true;
 
-    // Simulate a real 250 Hz data source: open the CSV and stream it
-    // line-by-line, one frame per timer tick.
-    m_dataStream.close();
-    m_dataStream.open(m_csvPath, std::ios::in);
-    if (m_dataStream.is_open()) {
-        std::string header;
-        std::getline(m_dataStream, header);   // skip header row
+    if (!m_csvPath.empty()) {
+        // CSV 回放模式
+        robot_ipoc = 0;
+        m_dataStream.close();
+        m_dataStream.open(m_csvPath, std::ios::in);
+        if (m_dataStream.is_open()) {
+            std::string header;
+            std::getline(m_dataStream, header);   // skip header row
+        }
+        m_timer->start(4);  // CSV 回放：定时器驱动 250Hz
+    } else {
+        // 实时模式：无 CSV 文件，数据由 udpserver（机器人 250Hz/IPOC）和
+        // ViewModel（超声 180Hz）实时写入 scandata 全局量。
+        // 用 1ms 定时器实时轮询 IPOC：机器人 IPOC 每 4ms 变化一次，
+        // 1ms 采样间隔保证不会漏掉任何硬件时间戳（检测到变化才处理一帧）。
+        m_lastIpoc = robot_ipoc;
+        m_timer->start(1);
+        qDebug() << "Real-time mode: reading live robot/ultrasound data";
     }
-
-    m_timer->start(4);  // 250Hz = 4ms
 
     qDebug() << "Data acquisition started at 250Hz";
 }

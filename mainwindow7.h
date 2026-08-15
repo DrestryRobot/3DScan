@@ -55,6 +55,9 @@
 
 #include "scan.h"
 #include <QThread>
+#include <QTimer>
+#include <QElapsedTimer>
+#include <QLabel>
 
 #include <vtkPointGaussianMapper.h>
 #include <vtkAppendPolyData.h>
@@ -78,6 +81,10 @@ class MainWindow7 : public QMainWindow
 public:
     MainWindow7(QWidget *parent = nullptr);
     void autoStartDebug(const QString& csvPath);
+    // SoundScan 扫描控制链接入口：开始绘制 / 停止绘制（暂停） / 结束绘制
+    void startDrawing();
+    void pauseDrawing();
+    void finishDrawing();
     ~MainWindow7();
 
 protected:
@@ -128,6 +135,7 @@ private:
     vtkSmartPointer<vtkUnsignedCharArray> colors;
     vtkSmartPointer<vtkActor> point1Actor;
     vtkSmartPointer<vtkActor> point2Actor;
+    QLabel* m_overlayLabel = nullptr;
 
 
     // 显示模式
@@ -140,6 +148,7 @@ private:
     std::vector<int> m_gridK;
     std::vector<int> m_gridJ;
     std::vector<int> m_surfPointPass;
+    int m_displayStride = 1;   // 点云显示抽稀步长（2 的幂，只增不减）
     std::vector<std::array<double, 6>> m_framePose;
     std::vector<double> m_frameSi;
     std::vector<int> m_frameBeam;
@@ -170,6 +179,7 @@ private:
     std::unordered_map<long long, std::unordered_map<int, SurfCell>> m_surfDataRows;
     std::unordered_map<int, SurfCell> m_surfPrevRow;
     bool m_surfHasPrev = false;
+    long long m_surfPrevKey = -1;   // 上一条已构建行 rkey = (pass<<32)|j
     int m_surfLastDataJ = 0;
     int m_surfLastDir = 0;
     bool m_surfDirInit = false;
@@ -219,6 +229,21 @@ private:
     // 当前帧有效点数
     int currentValidPoints = 0;
 
+    // 左上角叠加层：数据帧率 / 渲染帧率 / 扫描时间 / 点云点数
+    QTimer* m_overlayTimer = nullptr;
+    int m_guiFrames = 0;
+    int m_renderCount = 0;
+    QElapsedTimer m_scanTimer;
+    qint64 m_scanElapsedMs = 0;
+    bool m_scanTimeRunning = false;
+    // 最新一帧关键信息（叠加层/UI 行每秒刷新用）
+    quint32 m_lastIpoc = 0;
+    double m_lastSi = 0;
+    int m_lastBeam = 0;
+    double m_lastPose[6] = {0};
+    double m_lastAmp0 = 0;
+    double m_lastTof0 = 0;
+
     void initWidget();     // 初始化界面
     void initVTK();        // 初始化VTK
     void initPointCloud(); // 初始化点云
@@ -227,10 +252,13 @@ private:
     void pickPoint(int x, int y);   // 测量点
     void GetColorFromValue(double value, unsigned char &r, unsigned char &g, unsigned char &b);
     void renderFrame(const ScanFrame &frame);
+    void updateOverlay();
+    void positionOverlayLabel();
     void registerVBOWithCUDA();
     void resetPointCloud();
     void updateSurfaceMesh(int passIndex, bool forceTail = false);
     void recolorSurfaceMesh();
+    void dumpGridStats();
     void newSurfaceChunk();
 };
 

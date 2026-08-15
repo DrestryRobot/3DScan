@@ -123,11 +123,13 @@ SOURCES += \
     main.cpp \
     mainwindow7.cpp \
     scan.cpp \
+    scandata.cpp \
     vtkvboactor.cpp
 
 HEADERS += \
     mainwindow7.h \
     scan.h \
+    scandata.h \
     algorithm.h \
     vtkvboactor.h
 
