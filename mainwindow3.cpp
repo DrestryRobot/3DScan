@@ -95,6 +95,69 @@ MainWindow3::MainWindow3(QWidget *parent)
     connect(m_overlayTimer, &QTimer::timeout, this, &MainWindow3::updateOverlay);
     m_overlayTimer->start();
 
+    // UI 线程空闲率探针：1ms 定时器每秒应触发 ~1000 次，实际次数越低说明线程越忙
+    m_idleProbeTimer = new QTimer(this);
+    m_idleProbeTimer->setInterval(1);
+    connect(m_idleProbeTimer, &QTimer::timeout, this, [this]() {
+        m_idleProbeCount++;
+        if (m_idleGapValid) {
+            qint64 gap = m_idleGapTimer.restart();
+            if (gap > m_idleMaxGapMs) m_idleMaxGapMs = gap;
+        } else {
+            m_idleGapTimer.start();
+            m_idleGapValid = true;
+        }
+    });
+    m_idleProbeTimer->start();
+
+    // 限帧渲染：数据仍以 250Hz 全部累积进 VBO，重绘由该定时器统一触发（~30fps）。
+    // 避免每帧 Render() 造成渲染突发/队列积压，稳定绘制帧率与 GPU 利用率。
+    // 限帧间隔 60ms（≈16fps 上限）：单次 VTK 重绘实测 25~60ms（随点云增长），
+    // 33ms 会让 UI 线程饱和（~91% 忙），拖动视角时交互器渲染叠加导致卡顿闪动；
+    // 60ms 保证线程有余量，交互渲染平滑、无闪动。
+    m_renderTimer = new QTimer(this);
+    m_renderTimer->setInterval(60);
+    connect(m_renderTimer, &QTimer::timeout, this, [this]() {
+        if (m_timingTickTimerValid) {
+            qint64 gap = m_timingTickTimer.restart();
+            m_timingTickGapMs += gap;
+            if (gap > 80) m_timingGapSlowCount++;
+        } else {
+            m_timingTickTimer.start();
+            m_timingTickTimerValid = true;
+        }
+        QElapsedTimer tickTimer;
+        tickTimer.start();
+        // 先把攒批的数据写入 VBO，再重绘，保证画面包含最新点
+        flushPendingCloud();
+        int flushMs = (int)tickTimer.elapsed();
+        tickTimer.restart();
+        // 交互期间让交互器独占渲染（避免双渲染源闪烁）；
+        // 保持 m_renderRequested 为 true，松手后立即补一帧。
+        if (m_renderRequested && !m_interacting) {
+            m_renderRequested = false;
+            m_renderCount++;
+            renderWindow->Render();
+        }
+        int renderMs = (int)tickTimer.elapsed();
+        m_timingFlushMs += flushMs;
+        m_timingRenderMs += renderMs;
+        m_timingTicks++;
+        if (m_timingFlushMs + m_timingRenderMs >= 1000 || m_timingTicks >= 30) {
+            qDebug() << "[RenderTiming] flush平均" << (m_timingFlushMs / (double)m_timingTicks)
+                     << "ms, render平均" << (m_timingRenderMs / (double)m_timingTicks)
+                     << "ms, ticks:" << m_timingTicks
+                     << ", 实际间隔平均" << (m_timingTickGapMs / (double)m_timingTicks) << "ms"
+                     << ", >80ms的tick:" << m_timingGapSlowCount;
+            m_timingFlushMs = 0;
+            m_timingRenderMs = 0;
+            m_timingTicks = 0;
+            m_timingTickGapMs = 0;
+            m_timingGapSlowCount = 0;
+        }
+    });
+    m_renderTimer->start();
+
     // 曲面网格重建改由空闲定时器驱动（约10Hz），
     // 避免每40帧在渲染路径里同步重建网格造成周期性卡顿。
     m_surfaceMeshTimer = new QTimer(this);
@@ -169,6 +232,11 @@ MainWindow3::~MainWindow3()
 
 bool MainWindow3::eventFilter(QObject *obj, QEvent *event)
 {
+    // 统计 vtkWidget 的 Paint 事件（确认重绘是否在 UI 线程上吃掉大量时间）
+    if (obj == ui->vtkWidget && event->type() == QEvent::Paint) {
+        m_vtkPaintCount++;
+    }
+
     if (obj == ui->colorBarWidget && event->type() == QEvent::Paint) {
 
         QWidget* colorBar = ui->colorBarWidget;
@@ -268,6 +336,10 @@ void MainWindow3::initVTK()
     // 获取渲染窗口
     renderWindow = ui->vtkWidget->renderWindow();
     renderWindow->AddRenderer(renderer);
+    // 4K 下关闭多采样/抗锯齿，避免渲染目标尺寸成倍放大
+    renderWindow->SetMultiSamples(0);
+    // 统计 vtkWidget 的 Paint 事件（确认重绘是否在 UI 线程上吃掉大量时间）
+    ui->vtkWidget->installEventFilter(this);
 
     // 设置交互样式
     style = vtkSmartPointer<vtkInteractorStyleTrackballCamera>::New();
@@ -294,22 +366,22 @@ void MainWindow3::initVTK()
     vtkSmartPointer<vtkCallbackCommand> startInteract = vtkSmartPointer<vtkCallbackCommand>::New();
     startInteract->SetCallback([](vtkObject*, unsigned long, void* cd, void*) {
         MainWindow3* self = static_cast<MainWindow3*>(cd);
-        if (self->vboActor && self->cloudValidPoints > 20000) {
-            // 交互时抽稀显示，但保持整片点云覆盖，而不是只画前 1/3 个点
-            self->vboActor->SetDisplayStride(3);
-        }
+        // 交互期间由交互器独占渲染，定时器让路；不再强制改 stride，
+        // 避免点云密度在拖动开始/结束时跳变造成闪烁。
+        self->m_interacting = true;
     });
     startInteract->SetClientData(this);
-    interactor->AddObserver(vtkCommand::StartInteractionEvent, startInteract);
+    // 注意：VTK 的交互事件在 style 上发出，观察者必须挂在 style 上，
+    // 否则 m_interacting 永不置位，拖动时定时器仍与交互器双渲染。
+    style->AddObserver(vtkCommand::StartInteractionEvent, startInteract);
 
     vtkSmartPointer<vtkCallbackCommand> endInteract = vtkSmartPointer<vtkCallbackCommand>::New();
     endInteract->SetCallback([](vtkObject*, unsigned long, void* cd, void*) {
         MainWindow3* self = static_cast<MainWindow3*>(cd);
-        if (self->vboActor)
-            self->vboActor->SetDisplayStride(1);
+        self->m_interacting = false;
     });
     endInteract->SetClientData(this);
-    interactor->AddObserver(vtkCommand::EndInteractionEvent, endInteract);
+    style->AddObserver(vtkCommand::EndInteractionEvent, endInteract);
 
     // 第一个点标记（红色）
     vtkSmartPointer<vtkSphereSource> sphere1 = vtkSmartPointer<vtkSphereSource>::New();
@@ -535,33 +607,136 @@ void MainWindow3::AddPointCloud(const double pose[], const double amp[],
                             cloudBoundsMin[1] - 20, cloudBoundsMax[1] + 20,
                             cloudBoundsMin[2] - 20, cloudBoundsMax[2] + 20);
 
-    int result;
+    // 攒批：每帧只做 CPU 记账，CUDA 写入由 flushPendingCloud() 批量执行
+    // （一次 map/kernel/unmap/sync 处理 CUDA_BATCH_MAX 帧，降低每帧驱动开销）
+    PendingCloudFrame pc;
+    pc.beam = beam;
+    pc.hasWorld = (worldXYZ != nullptr);
+    pc.validCount = validCount;
+    for (int i = 0; i < 6; i++) pc.pose[i] = pose[i];
+    int nn = n; if (nn > 64) nn = 64;
+    for (int i = 0; i < nn; i++) {
+        pc.amp[i] = amp[i];
+        pc.tof[i] = tof[i];
+    }
     if (worldXYZ) {
-        result = processDirectCloudVBO(cudaProcessor, worldXYZ, amp, tof, n,
-                                       isAmpMode ? 1 : 0, cloudValidPoints);
+        for (int i = 0; i < nn; i++) {
+            pc.worldXYZ[i*3+0] = worldXYZ[i*3+0];
+            pc.worldXYZ[i*3+1] = worldXYZ[i*3+1];
+            pc.worldXYZ[i*3+2] = worldXYZ[i*3+2];
+        }
     } else {
         double localZ[64];
-        for (int i = 0; i < beam; i++)
+        for (int i = 0; i < beam && i < 64; i++)
             localZ[i] = beamZ ? beamZ[i] : -si * 0.5;
-        result = processDirectVBO(cudaProcessor, pose, amp, tof, localZ, beam,
-                                  isAmpMode ? 1 : 0, cloudValidPoints);
+        for (int i = 0; i < nn; i++) pc.localZ[i] = localZ[i];
+    }
+    m_pendingCloud.push_back(pc);
+    if ((int)m_pendingCloud.size() >= CUDA_BATCH_MAX)
+        flushPendingCloud();
+
+    if (renderNow) {
+        // 数据已更新，交给限帧定时器统一重绘（避免每帧 Render 突发）
+        m_renderRequested = true;
+    }
+}
+
+// ============================================================
+// 攒批 CUDA 写入：一次 map/kernel/unmap/sync 处理整批帧，
+// 在渲染定时器内调用（重绘前先落 VBO，保证画面包含最新点）
+// ============================================================
+void MainWindow3::flushPendingCloud()
+{
+    if (m_pendingCloud.empty()) return;
+    if (cloudValidPoints >= MAX_POINTS_PER_FRAME) {
+        m_pendingCloud.clear();
+        return;
+    }
+    if (!cudaProcessor || !vboPoints || !vboColors || !vboActor) {
+        m_pendingCloud.clear();
+        return;
+    }
+
+    int frameCount = (int)m_pendingCloud.size();
+    bool worldMode = m_pendingCloud.front().hasWorld;
+    int result = -1;
+    int totalValid = 0;
+    for (auto& pc : m_pendingCloud) totalValid += pc.validCount;
+
+    if (worldMode) {
+        // 世界坐标路径（均匀网格）：按帧顺序扁平化
+        int total = 0;
+        for (auto& pc : m_pendingCloud) total += pc.beam;
+        if ((int)m_batchWorld.size() < total * 3) m_batchWorld.resize(total * 3);
+        if ((int)m_batchWamp.size() < total) m_batchWamp.resize(total);
+        if ((int)m_batchWtof.size() < total) m_batchWtof.resize(total);
+        int off = 0;
+        for (auto& pc : m_pendingCloud) {
+            for (int i = 0; i < pc.beam; i++) {
+                m_batchWorld[(off + i) * 3 + 0] = pc.worldXYZ[i * 3 + 0];
+                m_batchWorld[(off + i) * 3 + 1] = pc.worldXYZ[i * 3 + 1];
+                m_batchWorld[(off + i) * 3 + 2] = pc.worldXYZ[i * 3 + 2];
+                m_batchWamp[off + i] = pc.amp[i];
+                m_batchWtof[off + i] = pc.tof[i];
+            }
+            off += pc.beam;
+        }
+        result = processDirectCloudVBatch(cudaProcessor, m_batchWorld.data(),
+                                          m_batchWamp.data(), m_batchWtof.data(),
+                                          total, isAmpMode ? 1 : 0, cloudValidPoints);
+    } else {
+        // pose 路径：要求整批 beam 一致
+        int beamN = m_pendingCloud.front().beam;
+        bool sameBeam = (beamN > 0);
+        for (auto& pc : m_pendingCloud)
+            if (pc.beam != beamN) { sameBeam = false; break; }
+        if (sameBeam) {
+            int total = frameCount * beamN;
+            if ((int)m_batchPose.size() < frameCount * 6) m_batchPose.resize(frameCount * 6);
+            if ((int)m_batchAmp.size() < total) m_batchAmp.resize(total);
+            if ((int)m_batchTof.size() < total) m_batchTof.resize(total);
+            if ((int)m_batchLocalZ.size() < total) m_batchLocalZ.resize(total);
+            int f = 0;
+            for (auto& pc : m_pendingCloud) {
+                for (int i = 0; i < 6; i++) m_batchPose[f * 6 + i] = pc.pose[i];
+                for (int i = 0; i < beamN; i++) {
+                    m_batchAmp[f * beamN + i]     = pc.amp[i];
+                    m_batchTof[f * beamN + i]     = pc.tof[i];
+                    m_batchLocalZ[f * beamN + i]  = pc.localZ[i];
+                }
+                f++;
+            }
+            result = processDirectVBatch(cudaProcessor, m_batchPose.data(),
+                                         m_batchAmp.data(), m_batchTof.data(),
+                                         m_batchLocalZ.data(), beamN, frameCount,
+                                         isAmpMode ? 1 : 0, cloudValidPoints);
+        } else {
+            // 兼容：beam 不一致时逐帧调用原接口（极少出现）
+            result = 0;
+            for (auto& pc : m_pendingCloud) {
+                int r = processDirectVBO(cudaProcessor, pc.pose, pc.amp, pc.tof,
+                                         pc.localZ, pc.beam,
+                                         isAmpMode ? 1 : 0, cloudValidPoints);
+                if (r != 0 && r != -2) { result = r; break; }
+            }
+        }
     }
 
     if (result == 0) {
-        cloudValidPoints += validCount;
+        cloudValidPoints += totalValid;
         if (cloudValidPoints > MAX_POINTS_PER_FRAME) cloudValidPoints = MAX_POINTS_PER_FRAME;
 
         vboActor->SetVBOIDs(vboPoints->bufferId(), vboColors->bufferId());
         vboActor->SetValidPointCount(cloudValidPoints);
-        // 显示抽稀：点云超过显示预算时，只绘制下标为 stride 倍数的点，
-        // 数据完整保留在 VBO/内存里，仅控制每帧绘制量，保证渲染帧率稳定。
-        // 步长取 2 的幂且只增不减，避免抽稀图案在云增长时跳动。
-        while (cloudValidPoints / m_displayStride > 1200000 && m_displayStride < 64)
+        // 显示抽稀预算 150 万点：数据仍全量保留在 VBO/内存里，
+        // 只减少每帧 GPU 实际处理的顶点数，降低单次 Render 成本。
+        // 阈值提高到 150 万，避免点云增长时频繁“减半变暗”造成闪烁。
+        while (cloudValidPoints / m_displayStride > 1500000 && m_displayStride < 64)
             m_displayStride *= 2;
         vboActor->SetDisplayStride(m_displayStride);
         vboActor->SetVBOInitialized(true);
 
-        { // 点云超出当前取景范围时立即重置取景（去掉定时节流）
+        { // 点云超出当前取景范围时立即重置取景（无时间间隔）
             bool firstFit = !cameraFitValid;
             bool outOfFit = !firstFit &&
                 (cloudBoundsMin[0] < cameraFitMin[0] || cloudBoundsMax[0] > cameraFitMax[0] ||
@@ -590,14 +765,11 @@ void MainWindow3::AddPointCloud(const double pose[], const double amp[],
                 cameraFitValid = true;
             }
         }
-
-        if (renderNow) {
-            renderWindow->Render();
-
-        }
     } else if (result != -2) {
-        qDebug() << "VBO Direct failed:" << result;
+        qDebug() << "VBO batch failed:" << result;
     }
+
+    m_pendingCloud.clear();
 }
 
 void MainWindow3::resetPointCloud()
@@ -606,6 +778,7 @@ void MainWindow3::resetPointCloud()
     m_displayStride = 1;
     cloudBoundsValid = false;
     cameraFitValid = false;
+    m_pendingCloud.clear();
     savedAmpValues.clear();
     savedTofValues.clear();
     m_gridK.clear();
@@ -647,23 +820,37 @@ void MainWindow3::resetPointCloud()
         vboActor->SetValidPointCount(0);
         vboActor->SetVBOInitialized(false);
     }
+    m_renderRequested = false;
+    m_cameraFitTimerValid = false;
     renderWindow->Render();
 }
 
 void MainWindow3::renderFrame(const ScanFrame& frame)
 {
-    // 直接每帧渲染（去掉 33ms 限帧），保证绘制连续
+    // 数据仍按 250Hz 全量累积进 VBO；实际重绘由限帧定时器统一触发（~30fps），
+    // 避免每帧 Render() 造成渲染突发、队列积压和 GPU 利用率波动
     const bool renderNow = true;
+    QElapsedTimer frameTimer;
+    frameTimer.start();
     AddPointCloud(frame.pose, frame.amp, frame.tof, frame.si, frame.beam, renderNow, frame.beamZ,
                         frame.hasWorld ? frame.worldXYZ : nullptr, frame.hasWorld ? frame.worldCount : 0,
                         frame.hasGrid ? frame.gridK : nullptr, frame.hasGrid ? frame.gridJ : nullptr,
                         frame.passIndex, frame.lx, frame.ly);
+    m_timingFrameMs += frameTimer.nsecsElapsed() / 1000;   // 微秒
+    m_timingFrameCount++;
+    if (m_timingFrameMs >= 500000) {
+        qDebug() << "[FrameTiming] AddPointCloud平均"
+                 << (m_timingFrameMs / (double)m_timingFrameCount) << "µs, 帧数"
+                 << m_timingFrameCount;
+        m_timingFrameMs = 0;
+        m_timingFrameCount = 0;
+    }
     // 曲面网格重建改由空闲定时器驱动（m_surfaceMeshTimer），不再阻塞渲染路径
     m_lastPassIndex = frame.passIndex;
 
-    // 统计每秒收到的数据帧数与实际渲染帧数（数据面板每秒读取并清零）
+    // 统计每秒收到的数据帧数（数据面板每秒读取并清零）；
+    // 实际渲染帧数由限帧定时器统计（每次 Render() 递增）
     m_guiFrames++;
-    m_renderCount++;
 
     // 保存最新一帧关键信息，供叠加层/UI 行每秒刷新
     m_lastIpoc = frame.ipoc;
@@ -681,6 +868,22 @@ void MainWindow3::updateOverlay()
     int renderFps = m_renderCount;
     m_guiFrames = 0;
     m_renderCount = 0;
+    if (!m_vtkSizeLogged && renderWindow) {
+        m_vtkSizeLogged = true;
+        int* sz = renderWindow->GetSize();
+        qDebug() << "[VTKSize] 渲染窗口" << sz[0] << "x" << sz[1];
+    }
+    if (m_vtkPaintCount > 0) {
+        qDebug() << "[VTKPaint] vtkWidget每秒Paint次数:" << m_vtkPaintCount;
+    }
+    m_vtkPaintCount = 0;
+    // UI 线程空闲率：1ms 探针每秒应约 1000 次，明显偏低说明线程被其它任务占满
+    if (m_idleProbeCount < 900) {
+        qDebug() << "[IdleProbe] UI线程1ms探针每秒触发" << m_idleProbeCount
+                 << "次（1000=空闲，越低越忙）, 最长单事件" << m_idleMaxGapMs << "ms";
+    }
+    m_idleProbeCount = 0;
+    m_idleMaxGapMs = 0;
     qDebug() << "[PointCloud] GUI收到帧:" << guiFrames
              << " 渲染帧率:" << renderFps << "fps"
              << " 点云点数:" << cloudValidPoints

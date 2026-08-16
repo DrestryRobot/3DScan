@@ -57,9 +57,24 @@ private:
     // 着色器
     unsigned int shaderProgram = 0;
     bool shaderInitialized = false;
+    // 缓存 uniform 位置（避免每帧 glGetUniformLocation 查询）
+    GLint mvpLoc = -1;
+    GLint strideLoc = -1;
+    // MVP 缓存：相机/窗口尺寸不变时复用，避免每帧 vtkMatrix4x4 分配与矩阵运算
+    float m_cachedMvp[16];
+    bool m_mvpValid = false;
+    unsigned long m_camMTime = 0;
+    unsigned long m_renMTime = 0;
+    int m_vpW = -1;
+    int m_vpH = -1;
 
     // VAO
     unsigned int vao = 0;
+    // 索引绘制（显示抽稀时只提交 1/stride 的顶点，GPU 不再全量处理）
+    unsigned int m_indexVBO = 0;
+    int m_indexCapacity = 0;     // 索引缓冲容量（按 2 的幂增长，避免每帧重建）
+    int m_indexStride = -1;      // 上次构建索引时的 stride
+    int m_indexCount = 0;        // 本次实际绘制的索引数
 
     bool initGL();
     bool initShaderAndVAO();

@@ -5,6 +5,9 @@
 #include <QTimer>
 #include <QString>
 #include <QMetaType>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QByteArray>
 #include <vector>
 #include <array>
 #include <map>
@@ -108,6 +111,8 @@ public:
     void setUsDelayFrames(int frames) { m_usDelayFrames = frames; }
     void setOnlineGridEnabled(bool on) { m_onlineGridEnabled = on; }
     bool isOnlineGridEnabled() const { return m_onlineGridEnabled; }
+    // 是否保存扫描数据（实时模式默认开启；回放模式不写盘）
+    void setSaveCsvEnabled(bool on) { m_saveCsv = on; }
 
 signals:
     void newFrameAvailable(const ScanFrame& frame);
@@ -123,6 +128,13 @@ private:
     void computeBeamDepths();
     void computeBeamDepthOnline();
     void buildUniformCloud();
+    // 统一超声数据滤波（板子判断/有效性/板内补帧；回放与实时一致）
+    void filterUltrasoundFrame(int beam_0);
+    // 数据落盘（Scan 线程内统一写入，避免多线程各自采样全局 IPOC）
+    void openCsvSave();
+    void writeCsvRow();
+    void flushCsvBuf();
+    void closeCsvSave();
     struct FrameRecord;
     struct PassFrameMeta;
     void processFrameOnline(const FrameRecord& rec, const PassFrameMeta& meta, int dir);
@@ -209,6 +221,9 @@ private:
     std::deque<std::unordered_map<long long, CandCell>> m_win;
     int m_winMax = 6;
     std::deque<FrameRecord> m_colorHist;
+    // 统一超声滤波状态（最早版逻辑：不做板内板外判断，点都补齐）
+    double m_lastUsAmp[64] = { 0 };     // 每个波束最近一次有效幅值（板内补帧用）
+    double m_lastUsTof[64] = { 0 };     // 每个波束最近一次有效声程
     std::vector<GridFrame> m_gridCloud;   // 方案2：均匀网格重采样点云
     bool m_gridReady = false;
     int m_gridIndex = 0;
@@ -224,6 +239,27 @@ private:
     bool m_isRunning;
     double m_lastLX = 0.0;
     double m_lastLY = 0.0;
+
+    // 临时调试：原始超声数据转储（滤波前，逐帧逐波束）
+    QFile m_rawDumpFile;
+    QByteArray m_rawDumpBuf;
+    bool m_rawDumpOpen = false;
+
+    // ============ 数据保存（CSV） ============
+    bool m_saveCsv = true;          // 实时模式保存数据
+    QFile m_saveCsvFile;            // 输出文件（Unicode 路径安全）
+    QByteArray m_saveCsvBuf;        // 行缓冲，攒批写盘
+    QString m_saveCsvPath;          // 输出文件完整路径
+    bool m_saveCsvOpen = false;
+    qint64 m_csvRows = 0;           // 已写行数（表头不计）
+    quint32 m_lastSavedIpoc = 0;    // 已写行对应的 IPOC（连续性检查）
+    bool m_lastSavedIpocValid = false;
+    QElapsedTimer m_csv10sTimer;    // 10s 帧率统计
+    bool m_csv10sValid = false;
+    int m_csv10sFrames = 0;
+
+    // ============ 实时缺帧统计 ============
+    quint64 m_lostFrames = 0;       // IPOC 跳变累计丢失帧
 };
 
 #endif // SCAN_H

@@ -1,10 +1,13 @@
 // Scan.cpp
 #include "Scan.h"
+#include "scandata.h"
 #include <QDebug>
 #include <QFile>
 #include <QDateTime>
 #include <QTextStream>
 #include <QElapsedTimer>
+#include <QDir>
+#include <cstdio>
 #include <unordered_map>
 #include <cmath>
 #include <algorithm>
@@ -52,6 +55,13 @@ Scan::Scan(QObject *parent)
 Scan::~Scan()
 {
     // timer is stopped in the worker thread before Scan is destroyed
+    if (m_rawDumpOpen) {
+        if (!m_rawDumpBuf.isEmpty()) m_rawDumpFile.write(m_rawDumpBuf);
+        m_rawDumpBuf.clear();
+        m_rawDumpFile.close();
+        m_rawDumpOpen = false;
+    }
+    closeCsvSave();
 }
 
 // ============================================
@@ -703,12 +713,162 @@ void Scan::updateGlobalVariables(const std::vector<std::string>& cells)
 
             amp[i] = (ampIndex < (int)cells.size()) ? safe_stod(cells[ampIndex], 0.0) : 0.0;
             tof[i] = (tofIndex < (int)cells.size()) ? safe_stod(cells[tofIndex], 0.0) : 0.0;
-            beamValid[i] = true;
+            // 原始有效性（0 = 板外/无效），交给统一滤波（板子判断/补帧）
+            beamValid[i] = (amp[i] != 0.0 || tof[i] != 0.0);
         }
     }
 
     // 数据更新标志
     robot_ipoc++;
+}
+
+// ============================================
+// 数据保存（CSV）：Scan 线程内统一落盘，
+// 不再由 SoundScan 独立线程采样全局量（避免双源竞争和采样丢帧误报）
+// ============================================
+void Scan::openCsvSave()
+{
+    if (m_saveCsvOpen) return;
+
+    QDir dir("C:/超声扫描/报告");
+    if (!dir.exists()) dir.mkpath(".");
+
+    QString base = QString("scan_%1").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+    QString full = dir.filePath(base + ".csv");
+    int n = 1;
+    while (QFile::exists(full)) {
+        full = dir.filePath(QString("%1_%2.csv").arg(base).arg(n++));
+    }
+
+    m_saveCsvFile.setFileName(full);
+    if (!m_saveCsvFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        qDebug() << "[Scan] 无法创建CSV文件:" << full;
+        return;
+    }
+
+    m_saveCsvPath = full;
+    m_saveCsvOpen = true;
+    m_csvRows = 0;
+    m_lastSavedIpocValid = false;
+    m_csv10sFrames = 0;
+    m_csv10sValid = true;
+    m_csv10sTimer.start();
+
+    // 表头：X,Y,Z,A,B,C,SI,AMP_1..49,TOF_1..49,BEAM,LX,LY
+    QByteArray hdr = QByteArrayLiteral("X,Y,Z,A,B,C,SI,");
+    int nb = beam; if (nb > 64) nb = 64;
+    for (int i = 1; i <= nb; i++) {
+        hdr += "AMP_" + QByteArray::number(i) + ",TOF_" + QByteArray::number(i) + ",";
+    }
+    hdr += QByteArrayLiteral("BEAM,LX,LY\n");
+    m_saveCsvBuf += hdr;
+    flushCsvBuf();
+
+    qDebug() << "[Scan] CSV文件已创建:" << full;
+}
+
+void Scan::writeCsvRow()
+{
+    if (!m_saveCsvOpen) return;
+
+    // 保存路径自身的 IPOC 连续性（CSV 按 250Hz 机器人帧写行，
+    // 差值 >4 即丢失了机器人帧，属真实丢帧）
+    if (m_lastSavedIpocValid) {
+        quint32 delta = robot_ipoc - m_lastSavedIpoc;
+        if (delta > 4) {
+            int lost = (int)(delta / 4) - 1;
+            qDebug() << "[IPOC不连续] 上次:" << m_lastSavedIpoc
+                     << "当前:" << robot_ipoc
+                     << "差值:" << delta
+                     << "丢失" << lost << "帧"
+                     << "行号:" << m_csvRows;
+        }
+    }
+    m_lastSavedIpoc = robot_ipoc;
+    m_lastSavedIpocValid = true;
+
+    // 10s 帧率统计
+    m_csv10sFrames++;
+    if (m_csv10sValid && m_csv10sTimer.elapsed() >= 10000) {
+        qDebug() << QString("[10s统计] 帧数: %1, 频率: %2 Hz, 总帧数: %3")
+                        .arg(m_csv10sFrames)
+                        .arg(m_csv10sFrames / 10.0, 0, 'f', 1)
+                        .arg(m_csv10sFrames);
+        m_csv10sTimer.restart();
+        m_csv10sFrames = 0;
+    }
+
+    m_csvRows++;
+
+    char buf[4096];
+    int off = 0;
+    off += snprintf(buf + off, sizeof(buf) - off,
+                    "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,",
+                    robot_x, robot_y, robot_z, robot_a, robot_b, robot_c, si);
+    int nb = beam; if (nb > 64) nb = 64;
+    for (int i = 0; i < nb; i++) {
+        off += snprintf(buf + off, sizeof(buf) - off, "%.6f,%.6f,", amp[i], tof[i]);
+    }
+    // 与旧格式保持一致：仅第一行写 BEAM/LX/LY（龙门坐标取全局 longmen，ADS 实时更新）
+    if (m_csvRows == 1) {
+        off += snprintf(buf + off, sizeof(buf) - off, "%d,%.6f,%.6f\n",
+                        beam, longmen[0], longmen[1]);
+    } else {
+        off += snprintf(buf + off, sizeof(buf) - off, ",,,\n");
+    }
+    m_saveCsvBuf.append(buf, off);
+
+    // 攒批写盘（约每 1000 行一次）
+    if (m_csvRows % 1000 == 0) flushCsvBuf();
+}
+
+void Scan::flushCsvBuf()
+{
+    if (!m_saveCsvOpen || m_saveCsvBuf.isEmpty()) return;
+    m_saveCsvFile.write(m_saveCsvBuf);
+    m_saveCsvBuf.clear();
+}
+
+void Scan::closeCsvSave()
+{
+    if (!m_saveCsvOpen) return;
+    flushCsvBuf();
+    m_saveCsvFile.flush();
+    m_saveCsvFile.close();
+    m_saveCsvOpen = false;
+    qDebug() << "[Scan] CSV文件已关闭，共写入" << m_csvRows << "行 ->" << m_saveCsvPath;
+}
+
+// ============================================
+// 统一超声数据滤波：板子判断 / 有效性 / 板内补帧。
+// 回放与实时共用同一套逻辑：从共享全局量读取原始帧
+// （ViewModel 写实时原始数据，CSV 回放行写原始数据），
+// 经居中窗口多数投票 + 短暂掉线保持后写回全局量。
+// ============================================
+void Scan::filterUltrasoundFrame(int beam_0)
+{
+    if (beam_0 <= 0 || beam_0 > 64) return;
+
+    // 与最早版逻辑一致：不做板内板外判断，点都补齐。
+    //   - 有效波束：输出原始值，并记录“最近有效值”供补帧；
+    //   - 无效的边缘波束（0/末）：保留原始值（与最早版一致，不补）；
+    //   - 无效的非边缘波束：用最近有效值补帧，保证所有波束每帧都有点。
+    for (int i = 0; i < beam_0; i++) {
+        bool isEdge = (i == 0 || i == beam_0 - 1);
+        if (beamValid[i]) {
+            m_lastUsAmp[i] = amp[i];
+            m_lastUsTof[i] = tof[i];
+            beamValid[i] = true;
+        } else if (isEdge) {
+            // 边缘波束即使无效也保留原始值
+            beamValid[i] = true;
+        } else {
+            // 非边缘无效：用最近有效值补帧，内部不留空缺
+            amp[i] = m_lastUsAmp[i];
+            tof[i] = m_lastUsTof[i];
+            beamValid[i] = true;
+        }
+    }
 }
 
 // ============================================
@@ -859,6 +1019,7 @@ void Scan::sendNextFrame()
         if (m_gridIndex >= (int)m_gridCloud.size()) {
             m_isRunning = false;
             m_start = false;
+            closeCsvSave();
             emit finished();
             qDebug() << "Grid playback finished";
             return;
@@ -902,6 +1063,7 @@ void Scan::sendNextFrame()
             m_isRunning = false;
             m_start = false;
             m_paused = false;
+            closeCsvSave();
             emit finished();
             qDebug() << "Playback finished";
             return;
@@ -920,30 +1082,65 @@ void Scan::sendNextFrame()
             qDebug() << "[Scan] 实时轮询:" << rtTicks
                      << " robot_ipoc:" << robot_ipoc
                      << " amp[0]:" << amp[0] << " tof[0]:" << tof[0]
-                     << " si:" << si << " beam:" << beam;
+                     << " si:" << si << " beam:" << beam
+                     << " 累计缺帧:" << m_lostFrames;
             rtTicks = 0;
             rtTimer.restart();
         }
     }
-    if (!m_dataStream.is_open() && robot_ipoc == m_lastIpoc) {
-        // 停滞检测：实时扫描中 IPOC 长时间不变化，说明机器人数据被阻塞/卡死
+    if (!m_dataStream.is_open()) {
         quint64 nowMs = (quint64)QDateTime::currentMSecsSinceEpoch();
-        if (m_lastIpocChangeMs != 0 && nowMs - m_lastIpocChangeMs > 500) {
-            static quint64 lastStallWarnMs = 0;
-            if (nowMs - lastStallWarnMs >= 1000) {
-                lastStallWarnMs = nowMs;
-                qDebug() << "[Scan] IPOC停滞警告: 已" << (nowMs - m_lastIpocChangeMs)
-                         << "ms 未变化, robot_ipoc=" << robot_ipoc;
+        if (robot_ipoc == m_lastIpoc) {
+            // 停滞检测：实时扫描中 IPOC 长时间不变化，说明机器人数据被阻塞/卡死
+            if (m_lastIpocChangeMs != 0 && nowMs - m_lastIpocChangeMs > 500) {
+                static quint64 lastStallWarnMs = 0;
+                if (nowMs - lastStallWarnMs >= 1000) {
+                    lastStallWarnMs = nowMs;
+                    qDebug() << "[Scan] IPOC停滞警告: 已" << (nowMs - m_lastIpocChangeMs)
+                             << "ms 未变化, robot_ipoc=" << robot_ipoc;
+                }
+            }
+            return;
+        }
+        // IPOC 增量驱动：每一帧机器人（250Hz）都处理，超声读取最近一次
+        // 样本（zero-order hold），保证 250 个 IPOC 帧每个都有点。
+        quint32 ipocDelta = robot_ipoc - m_lastIpoc;   // 无符号差，处理回绕
+        if (ipocDelta > 4) {
+            m_lostFrames += ipocDelta / 4 - 1;
+            static quint64 lastMissWarnMs = 0;
+            if (nowMs - lastMissWarnMs >= 1000) {
+                lastMissWarnMs = nowMs;
+                qDebug() << "[Scan] 实时缺帧: 上次IPOC" << m_lastIpoc
+                         << " 当前" << robot_ipoc
+                         << " 跳过" << (ipocDelta / 4 - 1) << "帧"
+                         << " 累计" << m_lostFrames << "帧";
             }
         }
-        return;
-    }
-    if (!m_dataStream.is_open()) {
         m_lastIpoc = robot_ipoc;
-        m_lastIpocChangeMs = (quint64)QDateTime::currentMSecsSinceEpoch();
+        m_lastIpocChangeMs = nowMs;
     }
+    // 临时调试：滤波前转储原始超声（逐帧逐波束）
+    if (m_rawDumpOpen) {
+        QByteArray line;
+        line += QByteArray::number(robot_ipoc) + "," + QByteArray::number(robot_x, 'f', 3)
+              + "," + QByteArray::number(robot_y, 'f', 3) + "," + QByteArray::number(robot_z, 'f', 3);
+        int nb = beam; if (nb > 49) nb = 49;
+        for (int i = 0; i < nb; i++)
+            line += "," + QByteArray::number(amp[i], 'f', 3) + "," + QByteArray::number(tof[i], 'f', 3)
+                  + "," + QByteArray::number(beamValid[i] ? 1 : 0);
+        line += "\n";
+        m_rawDumpBuf += line;
+        if ((m_csvRows & 0x3FF) == 0) {
+            m_rawDumpFile.write(m_rawDumpBuf);
+            m_rawDumpBuf.clear();
+        }
+    }
+    // 统一板子判断/有效性滤波/板内补帧（实时与回放同一套逻辑）
+    filterUltrasoundFrame(beam);
     computeBeamDepthOnline();
     m_currentIndex++;
+    // 每处理一帧写一行数据（实时模式落盘；回放模式未打开文件时为空操作）
+    writeCsvRow();
 
     // 发送帧数据
     if (m_onlineGridEnabled) {
@@ -1019,8 +1216,10 @@ void Scan::sendNextFrame()
         const int kPassHystFrames = 25;
         if (dir != 0 && dir == m_candDir) m_candDirCnt++;
         else { m_candDir = dir; m_candDirCnt = (dir != 0) ? 1 : 0; }
+        // 防抖窗口从 60 帧收到 30 帧（120ms）：掉头提交更快，
+        // 避免真实换向时机器人已退回一段距离、同一带内出现双向行号。
         if (dir != 0 && m_candDirCnt >= kPassHystFrames && m_passDir != 0 && dir != m_passDir
-            && m_currentIndex - m_lastFlipFrame >= 60) {
+            && m_currentIndex - m_lastFlipFrame >= 30) {
             if (!m_pass0RefFrozen && m_passUcnt > 0) {
                 m_pass0Ref = m_passUsum / m_passUcnt;
                 m_pass0RefFrozen = true;
@@ -1134,8 +1333,9 @@ void Scan::processFrameOnline(const FrameRecord& rec, const PassFrameMeta& meta,
         // Freeze the first band's reference early (frame 30): the u of the
         // startup frames is already stable, and a late freeze makes band 0's
         // rows slide in k and appear as a detached line at the scan start.
-        if (m_passFrames == 30)
+        if (m_passFrames == 30) {
             m_pass0Ref = m_passUsum / m_passUcnt;
+        }
         if (m_passFrames >= 30) m_pass0RefFrozen = true;
     }
     double uRef;
@@ -1532,11 +1732,13 @@ void Scan::start()
     m_noiseSuppressed = 0;
     m_win.clear();
     m_colorHist.clear();
+    for (int i = 0; i < 64; i++) { m_lastUsAmp[i] = 0; m_lastUsTof[i] = 0; }
 
     m_isRunning = true;
     m_currentIndex = 0;
     m_gridIndex = 0;
     m_lastIpoc = 0;
+    m_lostFrames = 0;
     m_start = true;
 
     if (!m_csvPath.empty()) {
@@ -1557,6 +1759,24 @@ void Scan::start()
         m_lastIpoc = robot_ipoc;
         m_timer->start(1);
         qDebug() << "Real-time mode: reading live robot/ultrasound data";
+        // 实时扫描数据统一由 Scan 线程落盘（SoundScan 的 CSV 线程已移除）
+        if (m_saveCsv) openCsvSave();
+        // 临时调试：打开原始超声数据转储（滤波前逐帧逐波束）
+        {
+            QString rawPath = QString("C:/超声扫描/raw_%1.csv")
+                              .arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+            m_rawDumpFile.setFileName(rawPath);
+            if (m_rawDumpFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                m_rawDumpOpen = true;
+                m_rawDumpBuf = QByteArrayLiteral("ipoc,x,y,z");
+                for (int i = 0; i < 49; i++)
+                    m_rawDumpBuf += ",a" + QByteArray::number(i) + ",t" + QByteArray::number(i)
+                                  + ",v" + QByteArray::number(i);
+                m_rawDumpBuf += "\n";
+                m_rawDumpFile.write(m_rawDumpBuf);
+                m_rawDumpBuf.clear();
+            }
+        }
     }
 
     qDebug() << "Data acquisition started at 250Hz";
@@ -1577,6 +1797,13 @@ void Scan::stop()
             }
         }
         m_timer->stop();
+        if (m_rawDumpOpen) {
+            if (!m_rawDumpBuf.isEmpty()) m_rawDumpFile.write(m_rawDumpBuf);
+            m_rawDumpBuf.clear();
+            m_rawDumpFile.close();
+            m_rawDumpOpen = false;
+        }
+        closeCsvSave();
         m_isRunning = false;
         m_start = false;
         m_paused = false;

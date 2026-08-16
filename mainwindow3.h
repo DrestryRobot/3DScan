@@ -29,6 +29,8 @@
 #include <vtkCellArray.h>
 #include <vtkPolyData.h>
 #include <array>
+#include <deque>
+#include <vector>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -234,6 +236,29 @@ private:
 
     // 左上角叠加层：数据帧率 / 渲染帧率 / 扫描时间 / 点云点数
     QTimer* m_overlayTimer = nullptr;
+    // 限帧渲染定时器：数据按 250Hz 累积进 VBO，重绘由该定时器统一触发（~30fps）
+    QTimer* m_renderTimer = nullptr;
+    bool m_renderRequested = false;    // 有点云数据更新待重绘
+    bool m_interacting = false;        // 用户正在拖拽/旋转视角（交互器独占渲染）
+    QElapsedTimer m_cameraFitTimer;    // ResetCamera 节流（避免频繁重置取景造成卡顿）
+    bool m_cameraFitTimerValid = false;
+    // 渲染耗时统计（限频日志，用于定位 CPU 瓶颈）
+    int m_timingFlushMs = 0;
+    int m_timingRenderMs = 0;
+    int m_timingTicks = 0;
+    qint64 m_timingFrameMs = 0;
+    int m_timingFrameCount = 0;
+    qint64 m_timingTickGapMs = 0;
+    QElapsedTimer m_timingTickTimer;
+    bool m_timingTickTimerValid = false;
+    int m_timingGapSlowCount = 0;     // 间隔 >80ms 的 tick 数（判断是否被饿死）
+    QTimer* m_idleProbeTimer = nullptr;
+    int m_idleProbeCount = 0;
+    int m_vtkPaintCount = 0;          // vtkWidget 每秒 Paint 事件数（确认重绘频率）
+    QElapsedTimer m_idleGapTimer;
+    bool m_idleGapValid = false;
+    qint64 m_idleMaxGapMs = 0;        // 1ms 探针之间的最长间隔（≈UI 线程最长单事件耗时）
+    bool m_vtkSizeLogged = false;
     // 曲面网格空闲重建定时器（去掉每40帧的周期性卡顿）
     QTimer* m_surfaceMeshTimer = nullptr;
     int m_lastPassIndex = 0;
@@ -242,6 +267,27 @@ private:
     QElapsedTimer m_scanTimer;
     qint64 m_scanElapsedMs = 0;
     bool m_scanTimeRunning = false;
+
+    // ============ CUDA 批处理（攒批一次 map/kernel/unmap/sync） ============
+    struct PendingCloudFrame {
+        double pose[6];
+        double amp[64];
+        double tof[64];
+        double localZ[64];
+        int beam = 0;
+        bool hasWorld = false;
+        int validCount = 0;
+        float worldXYZ[64 * 3];
+    };
+    std::deque<PendingCloudFrame> m_pendingCloud;
+    // 扁平化批处理缓冲区（复用，避免每批分配）
+    std::vector<double> m_batchPose;
+    std::vector<double> m_batchAmp;
+    std::vector<double> m_batchTof;
+    std::vector<double> m_batchLocalZ;
+    std::vector<float> m_batchWorld;
+    std::vector<double> m_batchWamp;
+    std::vector<double> m_batchWtof;
     // 最新一帧关键信息（叠加层/UI 行每秒刷新用）
     quint32 m_lastIpoc = 0;
     double m_lastSi = 0;
@@ -255,6 +301,7 @@ private:
     void initVTK();        // 初始化VTK
     void initPointCloud(); // 初始化点云
     void AddPointCloud(const double pose[], const double amp[], const double tof[], double si, int beam, bool renderNow = true, const double* beamZ = nullptr, const float* worldXYZ = nullptr, int worldCount = 0, const int* gridK = nullptr, const int* gridJ = nullptr, int passIndex = 0, double lx = 0, double ly = 0);
+    void flushPendingCloud();
     static void onMouseClick(vtkObject *obj, unsigned long event, void *clientData, void *callData); // 鼠标点击
     void pickPoint(int x, int y);   // 测量点
     void GetColorFromValue(double value, unsigned char &r, unsigned char &g, unsigned char &b);

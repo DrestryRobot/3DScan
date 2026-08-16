@@ -1,4 +1,4 @@
-// algorithm.h
+﻿// algorithm.h
 #ifndef ALGORITHM_H
 #define ALGORITHM_H
 
@@ -7,6 +7,9 @@ extern "C" {
 #endif
 
 typedef void* CUDAProcessorHandle;
+
+// CUDA 批处理最大帧数（攒批一次 map/kernel/unmap，降低每帧同步开销）
+#define CUDA_BATCH_MAX 16
 
 // 创建/销毁处理器
 CUDAProcessorHandle createCUDAProcessor(int maxBeamSize);
@@ -40,6 +43,26 @@ int processDirectCloudVBO(CUDAProcessorHandle processor,
                           int count,
                           int isAmpMode,
                           int startValid);
+
+// 批量版：一次处理 frameCount 帧（pose 变换路径）
+int processDirectVBatch(CUDAProcessorHandle processor,
+                        const double* poses,
+                        const double* amps,
+                        const double* tofs,
+                        const double* localZs,
+                        int beam,
+                        int frameCount,
+                        int isAmpMode,
+                        int startValid);
+
+// 批量版：一次处理多帧预计算世界坐标点（均匀网格路径）
+int processDirectCloudVBatch(CUDAProcessorHandle processor,
+                             const float* worldXYZ,
+                             const double* amps,
+                             const double* tofs,
+                             int totalCount,
+                             int isAmpMode,
+                             int startValid);
 
 // Reset accumulated VBO point cloud
 int resetVBO(CUDAProcessorHandle processor);

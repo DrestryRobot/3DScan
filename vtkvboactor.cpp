@@ -6,6 +6,7 @@
 #include <vtkOpenGLFramebufferObject.h>
 #include <QOpenGLContext>
 #include <QDebug>
+#include <vector>
 
 vtkStandardNewMacro(vtkVBOActor);
 
@@ -23,6 +24,9 @@ vtkVBOActor::~vtkVBOActor()
         }
         if (vao) {
             gl->glDeleteVertexArrays(1, &vao);
+        }
+        if (m_indexVBO) {
+            gl->glDeleteBuffers(1, &m_indexVBO);
         }
     }
 }
@@ -76,7 +80,7 @@ bool vtkVBOActor::initShaderAndVAO()
         "uniform int u_stride;\n"
         "out vec3 fragColor;\n"
         "void main() {\n"
-        "    gl_PointSize = 3.0;\n"
+        "    gl_PointSize = 2.0;\n"
         "    if (u_stride > 1 && (gl_VertexID % u_stride) != 0) {\n"
         "        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n"
         "        fragColor = color;\n"
@@ -143,6 +147,10 @@ bool vtkVBOActor::initShaderAndVAO()
 
     gl->glDeleteShader(vs);
     gl->glDeleteShader(fs);
+
+    // 缓存 uniform 位置（每帧查询很慢）
+    mvpLoc = gl->glGetUniformLocation(shaderProgram, "mvpMatrix");
+    strideLoc = gl->glGetUniformLocation(shaderProgram, "u_stride");
 
     // ===== 创建VAO =====
     gl->glGenVertexArrays(1, &vao);
@@ -215,49 +223,57 @@ void vtkVBOActor::Render(vtkRenderer* renderer, vtkMapper* mapper)
         return;
     }
 
-    // ===== 获取相机矩阵 =====
+    // ===== 获取相机矩阵（MVP 缓存：相机/视口不变时复用） =====
     vtkCamera* camera = renderer->GetActiveCamera();
     if (!camera) return;
 
-    vtkMatrix4x4* projMat = camera->GetProjectionTransformMatrix(
-        renderer->GetTiledAspectRatio(), -1, 1);
-    vtkMatrix4x4* viewMat = camera->GetModelViewTransformMatrix();
+    int* size = renderer->GetSize();
+    if (!m_mvpValid || camera->GetMTime() != m_camMTime ||
+        renderer->GetMTime() != m_renMTime ||
+        size[0] != m_vpW || size[1] != m_vpH) {
+        // Replicate vtkOpenGLCamera::GetKeyMatrices exactly:
+        //   WCVC = transpose(model-view)
+        //   VCDC = transpose(projection)
+        //   WCDC = WCVC * VCDC
+        vtkMatrix4x4* projMat = camera->GetProjectionTransformMatrix(
+            renderer->GetTiledAspectRatio(), -1, 1);
+        vtkMatrix4x4* viewMat = camera->GetModelViewTransformMatrix();
 
-    // Replicate vtkOpenGLCamera::GetKeyMatrices exactly:
-    //   WCVC = transpose(model-view)
-    //   VCDC = transpose(projection)
-    //   WCDC = WCVC * VCDC
-    // then upload the memory directly (matches VTK's own mappers).
-    vtkMatrix4x4* wcvc = vtkMatrix4x4::New();
-    wcvc->DeepCopy(viewMat);
-    wcvc->Transpose();
-    vtkMatrix4x4* vcdc = vtkMatrix4x4::New();
-    vcdc->DeepCopy(projMat);
-    vcdc->Transpose();
-    vtkMatrix4x4* wcdc = vtkMatrix4x4::New();
-    vtkMatrix4x4::Multiply4x4(wcvc, vcdc, wcdc);
-    float mvp[16];
-    for (int i = 0; i < 16; i++) {
-        mvp[i] = static_cast<float>(wcdc->Element[0][i]);
+        vtkMatrix4x4* wcvc = vtkMatrix4x4::New();
+        wcvc->DeepCopy(viewMat);
+        wcvc->Transpose();
+        vtkMatrix4x4* vcdc = vtkMatrix4x4::New();
+        vcdc->DeepCopy(projMat);
+        vcdc->Transpose();
+        vtkMatrix4x4* wcdc = vtkMatrix4x4::New();
+        vtkMatrix4x4::Multiply4x4(wcvc, vcdc, wcdc);
+        for (int i = 0; i < 16; i++) {
+            m_cachedMvp[i] = static_cast<float>(wcdc->Element[0][i]);
+        }
+        wcvc->Delete();
+        vcdc->Delete();
+        wcdc->Delete();
+        m_camMTime = camera->GetMTime();
+        m_renMTime = renderer->GetMTime();
+        m_vpW = size[0];
+        m_vpH = size[1];
+        m_mvpValid = true;
     }
-    wcvc->Delete();
-    vcdc->Delete();
-    wcdc->Delete();
-
 
     // ===== 设置视口 =====
-    int* size = renderer->GetSize();
     gl->glViewport(0, 0, size[0], size[1]);
     gl->glEnable(GL_DEPTH_TEST);
+    // 点云表面点深度几乎相等，GL_LESS 会让相邻点在旋转时随机通过/遮挡
+    // （点阵忽明忽暗）；LEQUAL 让等深度点稳定通过，消除旋转时的亮度抖动。
+    gl->glDepthFunc(GL_LEQUAL);
     gl->glEnable(GL_PROGRAM_POINT_SIZE);
 
     // ===== 使用着色器 =====
     gl->glUseProgram(shaderProgram);
 
-    GLint mvpLoc = gl->glGetUniformLocation(shaderProgram, "mvpMatrix");
-    gl->glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp);
-    GLint strideLoc = gl->glGetUniformLocation(shaderProgram, "u_stride");
-    gl->glUniform1i(strideLoc, displayStride);
+    gl->glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, m_cachedMvp);
+    // 抽稀改由索引绘制完成（只提交 1/stride 的顶点），着色器不再丢弃顶点
+    gl->glUniform1i(strideLoc, 1);
 
     // ===== 绘制 =====
     static bool firstDrawLogged = false;
@@ -267,7 +283,28 @@ void vtkVBOActor::Render(vtkRenderer* renderer, vtkMapper* mapper)
     }
 
     gl->glBindVertexArray(vao);
-    gl->glDrawArrays(GL_POINTS, 0, validPointCount);
+    if (displayStride > 1) {
+        // 索引绘制：只绘制下标为 stride 倍数的点
+        int count = (validPointCount + displayStride - 1) / displayStride;
+        if (m_indexStride != displayStride || count > m_indexCapacity) {
+            if (!m_indexVBO) gl->glGenBuffers(1, &m_indexVBO);
+            int cap = (m_indexCapacity < 1024) ? 1024 : m_indexCapacity;
+            while (cap < count) cap *= 2;
+            std::vector<GLuint> idx((size_t)cap);
+            for (int i = 0; i < cap; i++) idx[(size_t)i] = (GLuint)(i * displayStride);
+            gl->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_indexVBO);
+            gl->glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)cap * sizeof(GLuint),
+                             idx.data(), GL_STATIC_DRAW);
+            m_indexStride = displayStride;
+            m_indexCapacity = cap;
+        }
+        m_indexCount = count;
+        gl->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_indexVBO);
+        gl->glDrawElements(GL_POINTS, m_indexCount, GL_UNSIGNED_INT, nullptr);
+        gl->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    } else {
+        gl->glDrawArrays(GL_POINTS, 0, validPointCount);
+    }
     GLenum err = gl->glGetError();
     if (err != GL_NO_ERROR) {
         qDebug() << "GL error after draw:" << err;

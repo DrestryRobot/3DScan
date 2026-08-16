@@ -1,4 +1,4 @@
-// algorithm.cu - CUDA point transform and VBO write
+﻿// algorithm.cu - CUDA point transform and VBO write
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -158,6 +158,103 @@ __global__ void recolorPointsKernel(
 }
 
 // ---------------------------------------------------------------------------
+// Batch version of transformPointsVBO_Kernel: process frameCount frames in a
+// single kernel launch (one map/kernel/unmap/sync instead of per-frame).
+// Inputs are flattened: poses[f*6], amps/tofs/localZs[f*beam + e].
+// ---------------------------------------------------------------------------
+__global__ void transformPointsVBatch_Kernel(
+    const float* __restrict__ poses,
+    const float* __restrict__ amps,
+    const float* __restrict__ tofs,
+    const float* __restrict__ localZs,
+    int beam,
+    int frameCount,
+    int centerBeam,
+    float spacing,
+    int isAmpMode,
+    int startValid,
+    int maxPoints,
+    int* __restrict__ d_validCounter,
+    const unsigned int* __restrict__ d_colorLUT,
+    int lutSize,
+    float* vboPoints,
+    unsigned char* vboColors)
+{
+    int total = beam * frameCount;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+
+    int f = idx / beam;
+    int e = idx - f * beam;
+    const float* pose = poses + f * 6;
+    float a = amps[idx];
+    float t = tofs[idx];
+    if (a == 0.0f || t == 0.0f) return;
+
+    float offset = (e - centerBeam) * spacing;
+    float localX = 0.0f;
+    float localY = offset;
+    float localZVal = localZs ? localZs[idx] : 0.0f;
+
+    const float deg2rad = 0.01745329252f;
+    float angA = pose[3] * deg2rad;   // Z rotation
+    float angB = pose[4] * deg2rad;   // Y rotation
+    float angC = pose[5] * deg2rad;   // X rotation
+
+    float cosR = cosf(angC), sinR = sinf(angC);
+    float x1 = localX;
+    float y1 = localY * cosR - localZVal * sinR;
+    float z1 = localY * sinR + localZVal * cosR;
+
+    float cosP = cosf(angB), sinP = sinf(angB);
+    float x2 = x1 * cosP + z1 * sinP;
+    float y2 = y1;
+    float z2 = -x1 * sinP + z1 * cosP;
+
+    float cosY = cosf(angA), sinY = sinf(angA);
+    float x3 = x2 * cosY - y2 * sinY;
+    float y3 = x2 * sinY + y2 * cosY;
+    float z3 = z2;
+
+    float worldX = x3 + pose[0];
+    float worldY = y3 + pose[1];
+    float worldZ = z3 + pose[2];
+
+    int pos = startValid + atomicAdd(d_validCounter, 1);
+    if (pos >= maxPoints) return;
+
+    int outIdx = pos * 3;
+    vboPoints[outIdx]     = worldX;
+    vboPoints[outIdx + 1] = worldY;
+    vboPoints[outIdx + 2] = worldZ;
+
+    float value     = isAmpMode ? a : t;
+    float normalized = fminf(1.0f, fmaxf(0.0f, value));
+
+    unsigned char red, green, blue;
+    if (d_colorLUT && lutSize > 0) {
+        int ci = (int)(normalized * (lutSize - 1));
+        if (ci < 0) ci = 0;
+        if (ci >= lutSize) ci = lutSize - 1;
+        unsigned int color = d_colorLUT[ci];
+        red   = (unsigned char)((color >> 16) & 0xFF);
+        green = (unsigned char)((color >> 8) & 0xFF);
+        blue  = (unsigned char)(color & 0xFF);
+    } else {
+        if (normalized < 0.5f) {
+            float tt = normalized / 0.5f;
+            red = 0; green = (unsigned char)(tt * 255); blue = 255;
+        } else {
+            float tt = (normalized - 0.5f) / 0.5f;
+            red = (unsigned char)(tt * 255); green = (unsigned char)((1.0f - tt) * 255); blue = 0;
+        }
+    }
+    vboColors[outIdx]     = red;
+    vboColors[outIdx + 1] = green;
+    vboColors[outIdx + 2] = blue;
+}
+
+// ---------------------------------------------------------------------------
 // Write precomputed world-space points directly into the VBO (方案2 uniform grid).
 __global__ void writeCloudPointsKernel(
     const float* __restrict__ worldXYZ,
@@ -227,6 +324,13 @@ public:
                       const double localZ[], int beam, int isAmpMode, int startValid);
     int processCloud(const float worldXYZ[], const double amp[], const double tof[],
                      int count, int isAmpMode, int startValid);
+    // 批量版：一次 map/kernel/unmap/sync 处理 frameCount 帧
+    int processDirectBatch(const double poses[], const double amps[],
+                           const double tofs[], const double localZs[],
+                           int beam, int frameCount, int isAmpMode, int startValid);
+    int processCloudBatch(const float worldXYZ[], const double amps[],
+                          const double tofs[], int totalCount,
+                          int isAmpMode, int startValid);
 
     bool isInitialized() const { return initialized; }
     bool isVBORegistered() const { return vboRegistered; }
@@ -250,6 +354,18 @@ private:
     float* d_localZ = nullptr;
     float* h_worldXYZ = nullptr;
     float* d_worldXYZ = nullptr;
+
+    // 批量缓冲区（CUDA_BATCH_MAX 帧，攒批一次同步）
+    float* h_batchPose = nullptr;
+    float* h_batchAmp  = nullptr;
+    float* h_batchTof  = nullptr;
+    float* h_batchLocalZ = nullptr;
+    float* h_batchWorld  = nullptr;
+    float* d_batchPose = nullptr;
+    float* d_batchAmp  = nullptr;
+    float* d_batchTof  = nullptr;
+    float* d_batchLocalZ = nullptr;
+    float* d_batchWorld  = nullptr;
 
     int* d_validCounter = nullptr;
     unsigned int* d_colorLUT = nullptr;
@@ -289,6 +405,29 @@ CUDAPointCloudProcessor::CUDAPointCloudProcessor(int maxBeamSize)
     if (!h_worldXYZ) { cleanup(); return; }
     err = cudaMalloc(&d_worldXYZ, 3 * maxBeamSize * sizeof(float));
     if (err != cudaSuccess) { cleanup(); return; }
+
+    const int kBatch = CUDA_BATCH_MAX;
+    err = cudaMallocHost(&h_batchPose, kBatch * 6 * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); return; }
+    err = cudaMallocHost(&h_batchAmp, kBatch * 64 * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); return; }
+    err = cudaMallocHost(&h_batchTof, kBatch * 64 * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); return; }
+    err = cudaMallocHost(&h_batchLocalZ, kBatch * 64 * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); return; }
+    err = cudaMallocHost(&h_batchWorld, kBatch * 64 * 3 * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); return; }
+    err = cudaMalloc(&d_batchPose, kBatch * 6 * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); return; }
+    err = cudaMalloc(&d_batchAmp, kBatch * 64 * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); return; }
+    err = cudaMalloc(&d_batchTof, kBatch * 64 * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); return; }
+    err = cudaMalloc(&d_batchLocalZ, kBatch * 64 * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); return; }
+    err = cudaMalloc(&d_batchWorld, kBatch * 64 * 3 * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); return; }
+
     err = cudaMalloc(&d_validCounter, sizeof(int));
     if (err != cudaSuccess) { cleanup(); return; }
     err = cudaMalloc(&d_colorLUT, 256 * sizeof(unsigned int));
@@ -314,12 +453,23 @@ void CUDAPointCloudProcessor::cleanup()
     if (h_localZ) { cudaFreeHost(h_localZ); h_localZ = nullptr; }
     if (h_worldXYZ) { cudaFreeHost(h_worldXYZ); h_worldXYZ = nullptr; }
 
+    if (h_batchPose)   { cudaFreeHost(h_batchPose);   h_batchPose   = nullptr; }
+    if (h_batchAmp)    { cudaFreeHost(h_batchAmp);    h_batchAmp    = nullptr; }
+    if (h_batchTof)    { cudaFreeHost(h_batchTof);    h_batchTof    = nullptr; }
+    if (h_batchLocalZ) { cudaFreeHost(h_batchLocalZ); h_batchLocalZ = nullptr; }
+    if (h_batchWorld)  { cudaFreeHost(h_batchWorld);  h_batchWorld  = nullptr; }
+
     if (d_pose) { cudaFree(d_pose); d_pose = nullptr; }
     if (d_amp)  { cudaFree(d_amp);  d_amp  = nullptr; }
     if (d_tof)  { cudaFree(d_tof);  d_tof  = nullptr; }
     if (d_localZ) { cudaFree(d_localZ); d_localZ = nullptr; }
     if (d_worldXYZ) { cudaFree(d_worldXYZ); d_worldXYZ = nullptr; }
     if (d_worldXYZ) { cudaFree(d_worldXYZ); d_worldXYZ = nullptr; }
+    if (d_batchPose)   { cudaFree(d_batchPose);   d_batchPose   = nullptr; }
+    if (d_batchAmp)    { cudaFree(d_batchAmp);    d_batchAmp    = nullptr; }
+    if (d_batchTof)    { cudaFree(d_batchTof);    d_batchTof    = nullptr; }
+    if (d_batchLocalZ) { cudaFree(d_batchLocalZ); d_batchLocalZ = nullptr; }
+    if (d_batchWorld)  { cudaFree(d_batchWorld);  d_batchWorld  = nullptr; }
     if (d_validCounter) { cudaFree(d_validCounter); d_validCounter = nullptr; }
     if (d_colorLUT)     { cudaFree(d_colorLUT);     d_colorLUT     = nullptr; }
     if (d_recolor)      { cudaFree(d_recolor);      d_recolor      = nullptr; }
@@ -633,6 +783,183 @@ cleanup:
     d_vboColors = nullptr;
     return (err == cudaSuccess) ? 0 : -1;
 }
+
+// ---------------------------------------------------------------------------
+// 批量 pose 变换路径：一次处理 frameCount 帧（每帧 beam 个波束），
+// 一次 map / 一次 kernel / 一次 unmap / 一次同步。
+// ---------------------------------------------------------------------------
+int CUDAPointCloudProcessor::processDirectBatch(
+    const double poses[], const double amps[], const double tofs[],
+    const double localZs[], int beam, int frameCount,
+    int isAmpMode, int startValid)
+{
+    if (!initialized) {
+        printf("ERROR: Processor not initialized\n");
+        return -1;
+    }
+    if (beam <= 0 || beam > maxBeam) {
+        printf("ERROR: beam %d invalid (max: %d)\n", beam, maxBeam);
+        return -1;
+    }
+    if (frameCount <= 0 || frameCount > CUDA_BATCH_MAX) {
+        printf("ERROR: frameCount %d invalid (max: %d)\n", frameCount, CUDA_BATCH_MAX);
+        return -1;
+    }
+    if (!poses || !amps || !tofs || !localZs) {
+        printf("ERROR: Null input pointer\n");
+        return -1;
+    }
+    if (!vboRegistered) {
+        printf("ERROR: VBO not registered\n");
+        return -1;
+    }
+    if (startValid >= vboMaxPoints) {
+        return -2;  // cloud full
+    }
+
+    int total = beam * frameCount;
+    for (int f = 0; f < frameCount; f++) {
+        for (int i = 0; i < 6; i++) h_batchPose[f * 6 + i] = (float)poses[f * 6 + i];
+        for (int i = 0; i < beam; i++) {
+            h_batchAmp[f * beam + i]     = (float)amps[f * beam + i];
+            h_batchTof[f * beam + i]     = (float)tofs[f * beam + i];
+            h_batchLocalZ[f * beam + i]  = (float)localZs[f * beam + i];
+        }
+    }
+
+    cudaError_t err;
+    err = cudaGraphicsMapResources(1, &cudaVboPoints, 0);
+    if (err != cudaSuccess) return -1;
+    err = cudaGraphicsMapResources(1, &cudaVboColors, 0);
+    if (err != cudaSuccess) {
+        cudaGraphicsUnmapResources(1, &cudaVboPoints, 0);
+        return -1;
+    }
+
+    size_t pointSize = 0, colorSize = 0;
+    err = cudaGraphicsResourceGetMappedPointer((void**)&d_vboPoints, &pointSize, cudaVboPoints);
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaGraphicsResourceGetMappedPointer((void**)&d_vboColors, &colorSize, cudaVboColors);
+    if (err != cudaSuccess) goto cleanup;
+
+    err = cudaMemcpy(d_batchPose, h_batchPose, (size_t)frameCount * 6 * sizeof(float),
+                     cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMemcpy(d_batchAmp, h_batchAmp, (size_t)total * sizeof(float),
+                     cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMemcpy(d_batchTof, h_batchTof, (size_t)total * sizeof(float),
+                     cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMemcpy(d_batchLocalZ, h_batchLocalZ, (size_t)total * sizeof(float),
+                     cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) goto cleanup;
+
+    cudaMemset(d_validCounter, 0, sizeof(int));
+
+    int centerBeam = (beam - 1) / 2;
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (total + threadsPerBlock - 1) / threadsPerBlock;
+    transformPointsVBatch_Kernel<<<blocksPerGrid, threadsPerBlock>>>(
+        d_batchPose, d_batchAmp, d_batchTof, d_batchLocalZ,
+        beam, frameCount, centerBeam, 0.3f, isAmpMode, startValid, vboMaxPoints,
+        d_validCounter, d_colorLUT, lutSize, d_vboPoints, d_vboColors);
+
+    err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("transformPointsVBatch_Kernel failed: %s\n", cudaGetErrorString(err));
+    }
+
+cleanup:
+    cudaGraphicsUnmapResources(1, &cudaVboPoints, 0);
+    cudaGraphicsUnmapResources(1, &cudaVboColors, 0);
+    d_vboPoints = nullptr;
+    d_vboColors = nullptr;
+    return (err == cudaSuccess) ? 0 : -1;
+}
+
+// ---------------------------------------------------------------------------
+// 批量世界坐标路径：worldXYZ/amp/tof 已按帧顺序扁平化，一次同步写入。
+// ---------------------------------------------------------------------------
+int CUDAPointCloudProcessor::processCloudBatch(
+    const float worldXYZ[], const double amps[], const double tofs[],
+    int totalCount, int isAmpMode, int startValid)
+{
+    if (!initialized) {
+        printf("ERROR: Processor not initialized\n");
+        return -1;
+    }
+    if (totalCount <= 0 || totalCount > CUDA_BATCH_MAX * 64) {
+        printf("ERROR: totalCount %d invalid\n", totalCount);
+        return -1;
+    }
+    if (!worldXYZ || !amps || !tofs) {
+        printf("ERROR: Null input pointer\n");
+        return -1;
+    }
+    if (!vboRegistered) {
+        printf("ERROR: VBO not registered\n");
+        return -1;
+    }
+    if (startValid >= vboMaxPoints) {
+        return -2;  // cloud full
+    }
+
+    for (int i = 0; i < totalCount; i++) {
+        h_batchWorld[i * 3 + 0] = worldXYZ[i * 3 + 0];
+        h_batchWorld[i * 3 + 1] = worldXYZ[i * 3 + 1];
+        h_batchWorld[i * 3 + 2] = worldXYZ[i * 3 + 2];
+        h_batchAmp[i] = (float)amps[i];
+        h_batchTof[i] = (float)tofs[i];
+    }
+
+    cudaError_t err;
+    err = cudaGraphicsMapResources(1, &cudaVboPoints, 0);
+    if (err != cudaSuccess) return -1;
+    err = cudaGraphicsMapResources(1, &cudaVboColors, 0);
+    if (err != cudaSuccess) {
+        cudaGraphicsUnmapResources(1, &cudaVboPoints, 0);
+        return -1;
+    }
+
+    size_t pointSize = 0, colorSize = 0;
+    err = cudaGraphicsResourceGetMappedPointer((void**)&d_vboPoints, &pointSize, cudaVboPoints);
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaGraphicsResourceGetMappedPointer((void**)&d_vboColors, &colorSize, cudaVboColors);
+    if (err != cudaSuccess) goto cleanup;
+
+    err = cudaMemcpy(d_batchWorld, h_batchWorld, (size_t)totalCount * 3 * sizeof(float),
+                     cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMemcpy(d_batchAmp, h_batchAmp, (size_t)totalCount * sizeof(float),
+                     cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMemcpy(d_batchTof, h_batchTof, (size_t)totalCount * sizeof(float),
+                     cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) goto cleanup;
+
+    cudaMemset(d_validCounter, 0, sizeof(int));
+
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (totalCount + threadsPerBlock - 1) / threadsPerBlock;
+    writeCloudPointsKernel<<<blocksPerGrid, threadsPerBlock>>>(
+        d_batchWorld, d_batchAmp, d_batchTof, totalCount, isAmpMode,
+        startValid, vboMaxPoints, d_validCounter, d_colorLUT, lutSize,
+        d_vboPoints, d_vboColors);
+
+    err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("writeCloudPointsKernel(batch) failed: %s\n", cudaGetErrorString(err));
+    }
+
+cleanup:
+    cudaGraphicsUnmapResources(1, &cudaVboPoints, 0);
+    cudaGraphicsUnmapResources(1, &cudaVboColors, 0);
+    d_vboPoints = nullptr;
+    d_vboColors = nullptr;
+    return (err == cudaSuccess) ? 0 : -1;
+}
+
 // C interface
 // ---------------------------------------------------------------------------
 extern "C" {
@@ -719,6 +1046,35 @@ int processDirectCloudVBO(CUDAProcessorHandle processor,
     return ((CUDAPointCloudProcessor*)processor)->processCloud(
         worldXYZ, amp, tof, count, isAmpMode, startValid);
 }
+
+int processDirectVBatch(CUDAProcessorHandle processor,
+                        const double* poses,
+                        const double* amps,
+                        const double* tofs,
+                        const double* localZs,
+                        int beam,
+                        int frameCount,
+                        int isAmpMode,
+                        int startValid)
+{
+    if (!processor) return -1;
+    return ((CUDAPointCloudProcessor*)processor)->processDirectBatch(
+        poses, amps, tofs, localZs, beam, frameCount, isAmpMode, startValid);
+}
+
+int processDirectCloudVBatch(CUDAProcessorHandle processor,
+                             const float* worldXYZ,
+                             const double* amps,
+                             const double* tofs,
+                             int totalCount,
+                             int isAmpMode,
+                             int startValid)
+{
+    if (!processor) return -1;
+    return ((CUDAPointCloudProcessor*)processor)->processCloudBatch(
+        worldXYZ, amps, tofs, totalCount, isAmpMode, startValid);
+}
+
 int isCUDAAvailable(void)
 {
     int deviceCount = 0;
