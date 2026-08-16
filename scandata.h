@@ -8,11 +8,11 @@
 //   1. 所有跨模块共享的扫描/机器人全局量统一在这里声明，
 //      在 scandata.cpp 中定义，其他文件只 include 本头文件。
 //   2. 变量命名与 C:\3DScan 保持一致（m_start、amp[64] 等），
-//      保证 3DScan 的 mainwindow7/scan/vtkvboactor/algorithm
+//      保证 3DScan 的 mainwindow3/scan/vtkvboactor/algorithm
 //      移植过来后无需改名即可链接。
 //   3. 移植 3DScan 时需删除以下重复定义：
 //      - scan.cpp 第 14~22 行的 amp/tof/si/beam/robot_*/robot_ipoc/longmen/m_start
-//      - mainwindow7.cpp 第 885~892 行附近的本地 amp/tof/longmen 定义
+//      - mainwindow3.cpp 第 885~892 行附近的本地 amp/tof/longmen 定义
 // ============================================================
 
 #include <QtGlobal>

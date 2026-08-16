@@ -1,11 +1,5 @@
 # Build output
 build/
-release/
-debug/
-Makefile
-Makefile.Debug
-Makefile.Release
-.qmake.stash
 
 # Compiled / generated files
 *.obj

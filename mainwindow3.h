@@ -1,5 +1,5 @@
-#ifndef MAINWINDOW7_H
-#define MAINWINDOW7_H
+#ifndef MAINWINDOW3_H
+#define MAINWINDOW3_H
 
 #include <QMainWindow>
 
@@ -58,6 +58,7 @@
 #include <QTimer>
 #include <QElapsedTimer>
 #include <QLabel>
+#include <QFrame>
 
 #include <vtkPointGaussianMapper.h>
 #include <vtkAppendPolyData.h>
@@ -68,24 +69,25 @@
 #include <cuda_runtime.h>
 #include <vtkRendererCollection.h>
 
+class DataPanel;
+
 QT_BEGIN_NAMESPACE
 namespace Ui {
-class MainWindow7;
+class MainWindow3;
 }
 QT_END_NAMESPACE
 
-class MainWindow7 : public QMainWindow
+class MainWindow3 : public QMainWindow
 {
     Q_OBJECT
 
 public:
-    MainWindow7(QWidget *parent = nullptr);
+    MainWindow3(QWidget *parent = nullptr);
     void autoStartDebug(const QString& csvPath);
-    // SoundScan 扫描控制链接入口：开始绘制 / 停止绘制（暂停） / 结束绘制
     void startDrawing();
     void pauseDrawing();
     void finishDrawing();
-    ~MainWindow7();
+    ~MainWindow3();
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event);
@@ -111,12 +113,12 @@ private slots:
 
     void on_pushButton_11_clicked(); // 窗口截图
 
-    void on_pushButton_7_clicked(); // 开始扫描
+    void on_pushButton_7_clicked();  // 开始扫描
 
     void on_pushButton_12_clicked(); // 点云模式
 
 private:
-    Ui::MainWindow7 *ui;
+    Ui::MainWindow3 *ui;
 
     vtkSmartPointer<vtkRenderer> renderer;
     vtkSmartPointer<vtkRenderWindow> renderWindow;
@@ -135,7 +137,8 @@ private:
     vtkSmartPointer<vtkUnsignedCharArray> colors;
     vtkSmartPointer<vtkActor> point1Actor;
     vtkSmartPointer<vtkActor> point2Actor;
-    QLabel* m_overlayLabel = nullptr;
+    // ============ 侧边浮动数据面板（独立文件 datapanel.h/cpp，便于扩展） ============
+    DataPanel* m_dataPanel = nullptr;
 
 
     // 显示模式
@@ -231,6 +234,9 @@ private:
 
     // 左上角叠加层：数据帧率 / 渲染帧率 / 扫描时间 / 点云点数
     QTimer* m_overlayTimer = nullptr;
+    // 曲面网格空闲重建定时器（去掉每40帧的周期性卡顿）
+    QTimer* m_surfaceMeshTimer = nullptr;
+    int m_lastPassIndex = 0;
     int m_guiFrames = 0;
     int m_renderCount = 0;
     QElapsedTimer m_scanTimer;
@@ -245,6 +251,7 @@ private:
     double m_lastTof0 = 0;
 
     void initWidget();     // 初始化界面
+    void initDataPanel();  // 初始化侧边浮动数据面板
     void initVTK();        // 初始化VTK
     void initPointCloud(); // 初始化点云
     void AddPointCloud(const double pose[], const double amp[], const double tof[], double si, int beam, bool renderNow = true, const double* beamZ = nullptr, const float* worldXYZ = nullptr, int worldCount = 0, const int* gridK = nullptr, const int* gridJ = nullptr, int passIndex = 0, double lx = 0, double ly = 0);
@@ -253,7 +260,6 @@ private:
     void GetColorFromValue(double value, unsigned char &r, unsigned char &g, unsigned char &b);
     void renderFrame(const ScanFrame &frame);
     void updateOverlay();
-    void positionOverlayLabel();
     void registerVBOWithCUDA();
     void resetPointCloud();
     void updateSurfaceMesh(int passIndex, bool forceTail = false);
@@ -262,4 +268,4 @@ private:
     void newSurfaceChunk();
 };
 
-#endif // MAINWINDOW7_H
+#endif // MAINWINDOW3_H

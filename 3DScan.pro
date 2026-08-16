@@ -28,7 +28,7 @@ QMAKE_PROJECT_DEPTH = 0
 
 TEMPLATE = app
 CONFIG -= app_bundle
-TARGET = simulation
+TARGET = 3DScan
 # HEADERS += algorithm.h \
 #     vtkvboactor.h
 
@@ -121,20 +121,22 @@ LIBS += -lopengl32
 
 SOURCES += \
     main.cpp \
-    mainwindow7.cpp \
+    mainwindow3.cpp \
+    datapanel.cpp \
     scan.cpp \
     scandata.cpp \
     vtkvboactor.cpp
 
 HEADERS += \
-    mainwindow7.h \
+    mainwindow3.h \
+    datapanel.h \
     scan.h \
     scandata.h \
     algorithm.h \
     vtkvboactor.h
 
 FORMS += \
-    mainwindow7.ui
+    mainwindow3.ui
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin

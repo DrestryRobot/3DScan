@@ -1,4 +1,4 @@
-#include "mainwindow7.h"
+#include "mainwindow3.h"
 #include <QApplication>
 #include <QTimer>
 #include <QDebug>
@@ -11,7 +11,7 @@ static QMutex g_logMutex;
 static void logToFile(QtMsgType type, const QMessageLogContext&, const QString& msg)
 {
     QMutexLocker locker(&g_logMutex);
-    QFile f("C:/3DScan/debug.log");
+    QFile f("C:/3dscan/debug.log");
     if (f.open(QIODevice::Append | QIODevice::Text)) {
         QTextStream ts(&f);
         ts << QDateTime::currentDateTime().toString("HH:mm:ss.zzz") << " "
@@ -26,7 +26,7 @@ int main(int argc, char *argv[])
     qInstallMessageHandler(logToFile);
 
     QApplication a(argc, argv);
-    MainWindow7 w;
+    MainWindow3 w;
 
     w.setMinimumSize(1080, 720);
 
