@@ -170,20 +170,12 @@ bool vtkVBOActor::initShaderAndVAO()
     gl->glBindBuffer(GL_ARRAY_BUFFER, 0);
 
     shaderInitialized = true;
-    qDebug() << "Shader and VAO initialized";
     return true;
 }
 
+
 int vtkVBOActor::RenderOpaqueGeometry(vtkViewport* viewport)
 {
-    static bool entryLogged = false;
-    if (!entryLogged) {
-        qDebug() << "[VBOActor] RenderOpaqueGeometry called, valid="
-                 << validPointCount << "vboInit=" << vboInitialized
-                 << "ids=" << vboPointsID << vboColorsID;
-        entryLogged = true;
-    }
-
     vtkRenderer* renderer = vtkRenderer::SafeDownCast(viewport);
     if (!renderer) return 0;
 
@@ -276,11 +268,6 @@ void vtkVBOActor::Render(vtkRenderer* renderer, vtkMapper* mapper)
     gl->glUniform1i(strideLoc, 1);
 
     // ===== 绘制 =====
-    static bool firstDrawLogged = false;
-    if (!firstDrawLogged) {
-        qDebug() << "VBOActor first draw, points:" << validPointCount;
-        firstDrawLogged = true;
-    }
 
     gl->glBindVertexArray(vao);
     if (displayStride > 1) {
@@ -313,8 +300,4 @@ void vtkVBOActor::Render(vtkRenderer* renderer, vtkMapper* mapper)
 
     gl->glUseProgram(0);
 
-    static int frameCount = 0;
-    if (++frameCount % 100 == 0) {
-        qDebug() << "VBO render:" << validPointCount << "points";
-    }
 }

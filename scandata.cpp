@@ -1,5 +1,7 @@
 #include "scandata.h"
 
+QMutex g_scanDataMutex;
+
 // 超声采集数据
 double amp[64] = {0};
 double tof[64] = {0};

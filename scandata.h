@@ -16,6 +16,14 @@
 // ============================================================
 
 #include <QtGlobal>
+#include <QMutex>
+
+// 跨线程共享的扫描数据全局量（机器人位姿/IPOC、超声 AMP/TOF/SI/beamValid、
+// 龙门位置）由 udpserver / ads_poller / viewmodel 三个线程实时写入，而
+// Scan 线程在 CSV 回放与离线加载时也会读写同一批全局量。不加锁时，离线加载
+// 过程中实时线程穿插改写 pose/si/amp 等，网格点位错乱、单元大量去重合并，
+// 表现为“大量缺帧”。所有写方与 Scan 侧读方统一用该互斥锁保护。
+extern QMutex g_scanDataMutex;
 
 // ---- 超声采集数据（每帧最多 64 波束）----
 extern double amp[64];

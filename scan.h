@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <deque>
 #include <cstring>   // for memset
+#include <atomic>
 
 // 全局变量声明
 extern double amp[64];
@@ -39,13 +40,14 @@ struct GridFrame {
     double pose[6];      // 中心线插值位姿，仅用于界面显示
     float si;
     int valid;           // 有效点数（通常49）
+    int passIndex;       // 所属带序号（曲面网格按带分行）
     std::array<GridPoint, 49> pts;
     std::array<float, 49> amp;
     std::array<float, 49> tof;
     std::array<int, 49> gk;
     std::array<int, 49> gj;
 
-    GridFrame() : si(0), valid(0) {
+    GridFrame() : si(0), valid(0), passIndex(0) {
         memset(pose, 0, sizeof(pose));
         for (int i = 0; i < 49; i++) {
             pts[i].x = pts[i].y = pts[i].z = 0;
@@ -114,9 +116,22 @@ public:
     // 是否保存扫描数据（实时模式默认开启；回放模式不写盘）
     void setSaveCsvEnabled(bool on) { m_saveCsv = on; }
 
+    // 离线加载：在 Scan 线程内用与回放完全相同的在线网格管线处理整个
+    // CSV，完成后通过 buildFinished 通知；结果可用 loadedFrames() 读取
+    // （ScanFrame::worldXYZ 指向内部网格数据，消费完之前不要再次 load/start）。
+    void loadCSVAndBuild(const QString& filename);
+    void cancelBuild();
+    const std::vector<ScanFrame>& loadedFrames() const { return m_loadedFrames; }
+
+    // 完全重置扫描状态（停止采集、清除已加载文件/网格/暂停状态），
+    // 供“重置数据”按钮使用；必须在 Scan 线程内调用。
+    void resetForNewScan();
+
 signals:
     void newFrameAvailable(const ScanFrame& frame);
     void finished();
+    void buildProgress(int done, int total);
+    void buildFinished(bool ok, int frameCount);
 
 private slots:
     void sendNextFrame();
@@ -128,8 +143,6 @@ private:
     void computeBeamDepths();
     void computeBeamDepthOnline();
     void buildUniformCloud();
-    // 统一超声数据滤波（板子判断/有效性/板内补帧；回放与实时一致）
-    void filterUltrasoundFrame(int beam_0);
     // 数据落盘（Scan 线程内统一写入，避免多线程各自采样全局 IPOC）
     void openCsvSave();
     void writeCsvRow();
@@ -150,6 +163,10 @@ private:
 private:
     std::vector<std::vector<std::string>> m_data;
     std::string m_csvPath;
+    // 宽字符路径：Windows 下 std::ifstream 的窄字符串重载按 ANSI 代码页
+    // 转换路径（本机 GBK），UTF-8 字节的中文路径会打不开，导致加载/回放
+    // 0 帧。文件流统一用宽字符路径打开。
+    std::wstring m_csvPathW;
     std::ifstream m_dataStream;
     std::vector<std::array<float, 64>> m_beamDepths;
     std::vector<float> m_fitCx, m_fitCy, m_fitCz, m_fitSi;
@@ -218,12 +235,15 @@ private:
     int m_candDirCnt = 0;
     int m_lastFlipFrame = -100000;
     bool m_paused = false;
+    // 软暂停：实时模式下暂停命令到达后先继续轮询，等机器人 IPOC 真正
+    // 停稳（约 800ms）再停表，避免暂停命令到机器人停住之间的滑行段丢帧。
+    bool m_pausePending = false;
+    quint32 m_pauseLastIpoc = 0;
+    QElapsedTimer m_pauseStableTimer;
+    bool m_pauseStableValid = false;
     std::deque<std::unordered_map<long long, CandCell>> m_win;
     int m_winMax = 6;
     std::deque<FrameRecord> m_colorHist;
-    // 统一超声滤波状态（最早版逻辑：不做板内板外判断，点都补齐）
-    double m_lastUsAmp[64] = { 0 };     // 每个波束最近一次有效幅值（板内补帧用）
-    double m_lastUsTof[64] = { 0 };     // 每个波束最近一次有效声程
     std::vector<GridFrame> m_gridCloud;   // 方案2：均匀网格重采样点云
     bool m_gridReady = false;
     int m_gridIndex = 0;
@@ -240,10 +260,6 @@ private:
     double m_lastLX = 0.0;
     double m_lastLY = 0.0;
 
-    // 临时调试：原始超声数据转储（滤波前，逐帧逐波束）
-    QFile m_rawDumpFile;
-    QByteArray m_rawDumpBuf;
-    bool m_rawDumpOpen = false;
 
     // ============ 数据保存（CSV） ============
     bool m_saveCsv = true;          // 实时模式保存数据
@@ -260,6 +276,12 @@ private:
 
     // ============ 实时缺帧统计 ============
     quint64 m_lostFrames = 0;       // IPOC 跳变累计丢失帧
+
+    // ============ 离线加载（loadCSVAndBuild）============
+    bool m_suppressEmit = false;            // 离线构建期间禁止发 newFrameAvailable
+    bool m_offlineBuild = false;            // 离线构建中（EOF 分支不发 finished）
+    std::atomic<bool> m_buildCancel{false}; // 用户取消离线构建
+    std::vector<ScanFrame> m_loadedFrames;  // 离线构建结果（指向 m_onlineOut 网格）
 };
 
 #endif // SCAN_H

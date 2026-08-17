@@ -143,18 +143,6 @@ MainWindow3::MainWindow3(QWidget *parent)
         m_timingFlushMs += flushMs;
         m_timingRenderMs += renderMs;
         m_timingTicks++;
-        if (m_timingFlushMs + m_timingRenderMs >= 1000 || m_timingTicks >= 30) {
-            qDebug() << "[RenderTiming] flush平均" << (m_timingFlushMs / (double)m_timingTicks)
-                     << "ms, render平均" << (m_timingRenderMs / (double)m_timingTicks)
-                     << "ms, ticks:" << m_timingTicks
-                     << ", 实际间隔平均" << (m_timingTickGapMs / (double)m_timingTicks) << "ms"
-                     << ", >80ms的tick:" << m_timingGapSlowCount;
-            m_timingFlushMs = 0;
-            m_timingRenderMs = 0;
-            m_timingTicks = 0;
-            m_timingTickGapMs = 0;
-            m_timingGapSlowCount = 0;
-        }
     });
     m_renderTimer->start();
 
@@ -434,6 +422,48 @@ void MainWindow3::initPointCloud()
 {
     savedAmpValues.clear();
     savedTofValues.clear();
+    // 与 resetPointCloud 一致的完整清空：否则“开始扫描→开始绘制”等第二次
+    // 绘制会残留旧批帧/旧数组，导致新点云开头混入旧数据、曲面/保存索引错位。
+    m_pendingCloud.clear();
+    m_gridK.clear();
+    m_gridJ.clear();
+    m_surfPointPass.clear();
+    m_framePose.clear();
+    m_frameSi.clear();
+    m_frameBeam.clear();
+    m_frameLX.clear();
+    m_frameLY.clear();
+    m_frameCount.clear();
+    m_cloudXYZ.clear();
+    m_meshBuiltCount = 0;
+    m_meshIdx.clear();
+    m_meshQuadVerts.clear();
+    m_meshVertIdx.clear();
+    m_meshPatchDone.clear();
+    m_surfGrid.clear();
+    m_surfDataRows.clear();
+    m_surfRowCnt.clear();
+    m_surfRowDone.clear();
+    m_surfPrevRow.clear();
+    m_surfHasPrev = false;
+    m_surfPrevKey = -1;
+    m_surfLastDataJ = 0;
+    m_surfLastDir = 0;
+    m_surfDirInit = false;
+    m_surfDataN = 0;
+    m_meshCurBand = -1;
+    m_surfRowLastSeen.clear();
+    m_surfaceMode = false;
+    m_interacting = false;
+    m_lastPassIndex = 0;
+    m_lastIpoc = 0;
+    m_lastSi = 0;
+    m_lastBeam = 0;
+    m_lastAmp0 = 0;
+    m_lastTof0 = 0;
+    for (int k = 0; k < 6; k++) m_lastPose[k] = 0;
+    m_guiFrames = 0;
+    m_renderCount = 0;
 
     // 创建占位 PolyData 和 Mapper（确保 mapper 非空且长期存在）
     points   = vtkSmartPointer<vtkPoints>::New();
@@ -459,7 +489,6 @@ void MainWindow3::initPointCloud()
     renderer->AddActor(vboActor);
     m_surfChunks.clear();
     newSurfaceChunk();
-    qDebug() << "initPointCloud: vboActor added";
     cloudValidPoints = 0;
     cloudBoundsValid = false;
     cameraFitValid = false;
@@ -509,8 +538,6 @@ void MainWindow3::registerVBOWithCUDA()
     vboColors->allocate(vboMaxPoints * 3 * sizeof(unsigned char));
     vboColors->release();
 
-    qDebug() << "VBO Points ID:" << vboPoints->bufferId();
-    qDebug() << "VBO Colors ID:" << vboColors->bufferId();
 
     // 注册 VBO 到 CUDA
     int result = registerVBO(cudaProcessor,
@@ -519,7 +546,6 @@ void MainWindow3::registerVBOWithCUDA()
                              vboMaxPoints);
 
     if (result == 0) {
-        qDebug() << "VBO registered to CUDA successfully!";
         vboInitialized = true;
         vboRegistered = true;   // 置位：AMP/TOF 切换时才能对已有点云整体重着色
         setColorLUT(cudaProcessor, color_Amplitude, 256);
@@ -809,10 +835,14 @@ void MainWindow3::resetPointCloud()
     m_surfDataN = 0;
     m_meshCurBand = -1;
     m_surfRowLastSeen.clear();
+    m_interacting = false;   // 交互状态卡住会阻止渲染定时器重绘，重置时一并复位
+    // 强制回到点云模式并恢复点云可见性：若上次停留在曲面模式，
+    // vboActor 仍处于隐藏状态，新扫描会"没有图像"。
+    m_surfaceMode = false;
     for (auto& ch : m_surfChunks) if (ch.actor) ch.actor->VisibilityOff();
     m_surfChunks.clear();
     newSurfaceChunk();
-    m_surfaceMode = false;
+    if (vboActor) vboActor->VisibilityOn();
     if (cudaProcessor && vboRegistered) {
         resetVBO(cudaProcessor);
     }
@@ -820,8 +850,17 @@ void MainWindow3::resetPointCloud()
         vboActor->SetValidPointCount(0);
         vboActor->SetVBOInitialized(false);
     }
+    // 清空“最新帧”显示状态（数据面板/叠加层每秒读取），与全新启动一致
+    m_lastPassIndex = 0;
+    m_lastIpoc = 0;
+    m_lastSi = 0;
+    m_lastBeam = 0;
+    m_lastAmp0 = 0;
+    m_lastTof0 = 0;
+    for (int k = 0; k < 6; k++) m_lastPose[k] = 0;
     m_renderRequested = false;
     m_cameraFitTimerValid = false;
+    renderer->ResetCamera();   // 与 initPointCloud 一致：重置后回到默认视角
     renderWindow->Render();
 }
 
@@ -830,21 +869,10 @@ void MainWindow3::renderFrame(const ScanFrame& frame)
     // 数据仍按 250Hz 全量累积进 VBO；实际重绘由限帧定时器统一触发（~30fps），
     // 避免每帧 Render() 造成渲染突发、队列积压和 GPU 利用率波动
     const bool renderNow = true;
-    QElapsedTimer frameTimer;
-    frameTimer.start();
     AddPointCloud(frame.pose, frame.amp, frame.tof, frame.si, frame.beam, renderNow, frame.beamZ,
                         frame.hasWorld ? frame.worldXYZ : nullptr, frame.hasWorld ? frame.worldCount : 0,
                         frame.hasGrid ? frame.gridK : nullptr, frame.hasGrid ? frame.gridJ : nullptr,
                         frame.passIndex, frame.lx, frame.ly);
-    m_timingFrameMs += frameTimer.nsecsElapsed() / 1000;   // 微秒
-    m_timingFrameCount++;
-    if (m_timingFrameMs >= 500000) {
-        qDebug() << "[FrameTiming] AddPointCloud平均"
-                 << (m_timingFrameMs / (double)m_timingFrameCount) << "µs, 帧数"
-                 << m_timingFrameCount;
-        m_timingFrameMs = 0;
-        m_timingFrameCount = 0;
-    }
     // 曲面网格重建改由空闲定时器驱动（m_surfaceMeshTimer），不再阻塞渲染路径
     m_lastPassIndex = frame.passIndex;
 
@@ -868,26 +896,6 @@ void MainWindow3::updateOverlay()
     int renderFps = m_renderCount;
     m_guiFrames = 0;
     m_renderCount = 0;
-    if (!m_vtkSizeLogged && renderWindow) {
-        m_vtkSizeLogged = true;
-        int* sz = renderWindow->GetSize();
-        qDebug() << "[VTKSize] 渲染窗口" << sz[0] << "x" << sz[1];
-    }
-    if (m_vtkPaintCount > 0) {
-        qDebug() << "[VTKPaint] vtkWidget每秒Paint次数:" << m_vtkPaintCount;
-    }
-    m_vtkPaintCount = 0;
-    // UI 线程空闲率：1ms 探针每秒应约 1000 次，明显偏低说明线程被其它任务占满
-    if (m_idleProbeCount < 900) {
-        qDebug() << "[IdleProbe] UI线程1ms探针每秒触发" << m_idleProbeCount
-                 << "次（1000=空闲，越低越忙）, 最长单事件" << m_idleMaxGapMs << "ms";
-    }
-    m_idleProbeCount = 0;
-    m_idleMaxGapMs = 0;
-    qDebug() << "[PointCloud] GUI收到帧:" << guiFrames
-             << " 渲染帧率:" << renderFps << "fps"
-             << " 点云点数:" << cloudValidPoints
-             << " 保存点数:" << savedAmpValues.size();
 
     if (m_dataPanel) {
         qint64 scanMs = m_scanElapsedMs + (m_scanTimeRunning ? m_scanTimer.elapsed() : 0);
@@ -1072,14 +1080,12 @@ void MainWindow3::dumpGridStats()
 {
     int n = (int)m_gridK.size();
     if (n == 0 || (int)m_surfPointPass.size() < n || (int)m_gridJ.size() < n) {
-        qDebug() << "[GridStats] 无网格数据";
         return;
     }
     int maxPass = 0;
     for (int i = 0; i < n; i++) {
         if (m_surfPointPass[i] > maxPass) maxPass = m_surfPointPass[i];
     }
-    qDebug() << "[GridStats] 总点数:" << n << " 带数:" << (maxPass + 1);
     for (int p = 0; p <= maxPass; p++) {
         long long minK = 0, maxK = 0, minJ = 0, maxJ = 0;
         int cnt = 0;
@@ -1100,8 +1106,6 @@ void MainWindow3::dumpGridStats()
             }
             cnt++;
         }
-        qDebug() << "[GridStats] 带" << p << ": k=[" << minK << "," << maxK << "]"
-                 << " j=[" << minJ << "," << maxJ << "] 点数:" << cnt;
     }
 }
 
@@ -1153,9 +1157,6 @@ void MainWindow3::on_pushButton_5_clicked()
 // 加载数据
 void MainWindow3::on_pushButton_6_clicked()
 {
-    // 初始化点云
-    initPointCloud();
-
     // 弹出文件选择对话框
     QString filename = QFileDialog::getOpenFileName(
         this,
@@ -1168,185 +1169,111 @@ void MainWindow3::on_pushButton_6_clicked()
         return;
     }
 
-    std::ifstream file(filename.toStdString());
-    if (!file.is_open()) {
-        QMessageBox::warning(this, "错误", "无法打开文件: " + filename);
-        return;
+    // 先停掉正在进行的扫描/回放，避免与离线构建并发访问 Scan 状态
+    if (m_isScanning) {
+        QMetaObject::invokeMethod(m_scan, [this]() { m_scan->stop(); }, Qt::BlockingQueuedConnection);
+        m_isScanning = false;
+        m_drawPaused = false;
+        ui->pushButton_7->setText("开始扫描");
+        qDebug() << "Scan stopped before loading data";
     }
 
-    // 获取文件大小
-    file.seekg(0, std::ios::end);
-    std::streampos fileSize = file.tellg();
-    file.seekg(0, std::ios::beg);
+    // 与“开始绘制”相同的渲染起点
+    initPointCloud();
 
-    // 创建进度对话框
     QProgressDialog progressDialog("正在加载数据...", "取消", 0, 100, this);
     progressDialog.setWindowTitle("加载进度");
     progressDialog.setWindowModality(Qt::WindowModal);
     progressDialog.setMinimumDuration(0);
     progressDialog.setValue(0);
 
-    // CSV解析函数
-    auto parseCSVLine = [](const std::string& line) -> std::vector<std::string> {
-        std::vector<std::string> result;
-        std::string cell;
-        bool inQuotes = false;
-
-        for (char ch : line) {
-            if (ch == '"') {
-                inQuotes = !inQuotes;
-            } else if (ch == ',' && !inQuotes) {
-                result.push_back(cell);
-                cell.clear();
-            } else {
-                cell += ch;
+    bool cancelRequested = false;
+    QMetaObject::Connection pc = connect(m_scan, &Scan::buildProgress,
+        this, [&](int done, int total) {
+            if (progressDialog.wasCanceled() || cancelRequested) {
+                cancelRequested = true;
+                m_scan->cancelBuild();
+                return;
             }
-        }
-        result.push_back(cell);
-
-        return result;
-    };
-
-    // 安全转换函数
-    auto safe_stod = [](const std::string& str, double defaultVal = 0.0) -> double {
-        std::string trimmed = str;
-        // 去除首尾空格
-        trimmed.erase(0, trimmed.find_first_not_of(" \t\n\r"));
-        trimmed.erase(trimmed.find_last_not_of(" \t\n\r") + 1);
-
-        if (trimmed.empty()) {
-            return defaultVal;
-        }
-
-        try {
-            return std::stod(trimmed);
-        } catch (const std::exception&) {
-            return defaultVal;
-        }
-    };
-
-    // 读取表头
-    std::string headerLine;
-    if (!std::getline(file, headerLine)) {
-        QMessageBox::warning(this, "错误", "文件为空或缺少表头行");
-        file.close();
-        return;
-    }
-
-    // 记录表头位置
-    std::streampos headerPos = file.tellg();
-
-    std::vector<std::string> headers = parseCSVLine(headerLine);
-
-    // 建立列名到索引的映射
-    std::map<std::string, int> Index;
-    for (int i = 0; i < (int)headers.size(); i++) {
-        Index[headers[i]] = i;
-    }
-
-    // 根据列名获取索引
-    auto get = [&](const std::string& Name) -> int {
-        auto it = Index.find(Name);
-        if (it != Index.end()) {
-            return it->second;
-        }
-        return -1;
-    };
-
-    // 统计信息
-    bool canceled = false;
-    int beam = 0;
-    double longmen[2] = {0.0};
-    double si = 0.0;
-    double amp[64] = {0.0};
-    double tof[64] = {0.0};
-
-    int BEAM  = get("BEAM");
-    int LX    = get("LX");
-    int LY    = get("LY");
-    int X     = get("X");
-    int SI    = get("SI");
-    int AMP_1 = get("AMP_1");
-    int TOF_1 = get("TOF_1");
-
-    std::string prevLine;
-    std::string line;
-    int frameIndex = 0;
-
-    while (std::getline(file, line))
-    {
-        if (progressDialog.wasCanceled()) {
-            canceled = true;
-            break;
-        }
-
-        std::streampos currentPos = file.tellg();
-        if (currentPos >= headerPos && fileSize > headerPos) {
-            double progress = static_cast<double>(currentPos - headerPos) /
-                              static_cast<double>(fileSize - headerPos) * 100.0;
-            progressDialog.setValue(static_cast<int>(progress));
-        }
-
-        if (frameIndex == 0) {
-            prevLine = line;
-            frameIndex++;
-            continue;
-        }
-
-        std::vector<std::string> cells_main = parseCSVLine(prevLine);
-        std::vector<std::string> cells_current = parseCSVLine(line);
-
-        beam = 49;
-        if (BEAM != -1 && BEAM < (int)cells_main.size()) {
-            double bv = safe_stod(cells_main[BEAM], 49.0);
-            if (bv > 0 && bv <= 64) beam = (int)bv;
-        }
-
-        if (LX != -1 && LX < (int)cells_main.size()) longmen[0] = safe_stod(cells_main[LX]);
-        if (LY != -1 && LY < (int)cells_main.size()) longmen[1] = safe_stod(cells_main[LY]);
-
-        double pose[6] = {0, 0, 0, 0, 0, 0};
-        if (X != -1) {
-            for (int i = 0; i < 6 && (X + i) < (int)cells_main.size(); i++) {
-                pose[i] = safe_stod(cells_main[X + i]);
+            if (total > 0) progressDialog.setValue(done * 100 / total);
+        });
+    QMetaObject::Connection fc = connect(m_scan, &Scan::buildFinished,
+        this, [&](bool ok, int frameCount) {
+            if (!ok) {
+                progressDialog.setValue(100);
+                progressDialog.close();
+                return;
             }
-        }
-        pose[0] += longmen[1];
-        pose[1] -= longmen[0];
+            progressDialog.setLabelText("正在绘制...");
+            const std::vector<ScanFrame>& frames = m_scan->loadedFrames();
+            progressDialog.setRange(0, frameCount > 0 ? frameCount : 1);
+            progressDialog.setValue(0);
+            const int n = (int)frames.size();
+            // Throttle dialog refresh and periodically pump the event loop so
+            // the render timer / surface-mesh timer can run while feeding a
+            // large file (otherwise the modal draw loop freezes the UI).
+            QElapsedTimer uiPump;
+            uiPump.start();
+            for (int i = 0; i < n; i++) {
+                renderFrame(frames[i]);
+                if ((i & 0xFF) == 0 && uiPump.elapsed() >= 80) {
+                    uiPump.restart();
+                    progressDialog.setValue(i + 1);
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+                }
+                if (progressDialog.wasCanceled() || cancelRequested) break;
+            }
+            progressDialog.setValue(frameCount);
+            renderWindow->Render();
+            qDebug() << "Loaded data drawn:" << n << "grid frames,"
+                     << cloudValidPoints << "points";
+        });
 
-        si = 0.0;
-        if (SI != -1 && SI < (int)cells_current.size()) si = safe_stod(cells_current[SI]);
+    // 在 Scan 线程内跑与回放完全相同的网格管线（最快速度）
+    progressDialog.show();
+    QMetaObject::invokeMethod(m_scan, [this, filename]() {
+        m_scan->loadCSVAndBuild(filename);
+    }, Qt::QueuedConnection);
 
-        for (int i = 0; i < beam; i++) {
-            int ampIndex = (AMP_1 != -1 ? AMP_1 + 2 * i : -1);
-            int tofIndex = (TOF_1 != -1 ? TOF_1 + 2 * i : -1);
-            amp[i]  = (ampIndex >= 0 && ampIndex < (int)cells_current.size()) ? safe_stod(cells_current[ampIndex]) : 0.0;
-            tof[i]  = (tofIndex >= 0 && tofIndex < (int)cells_current.size()) ? safe_stod(cells_current[tofIndex]) : 0.0;
-        }
+    progressDialog.exec();
 
-        AddPointCloud(pose, amp, tof, si, beam, false);
-
-        prevLine = line;
-        frameIndex++;
-    }
-
-    file.close();
-
-    if (canceled) {
-        progressDialog.setValue(100);
-        return;
-    }
-
-    progressDialog.setValue(100);
-
-    renderWindow->Render();
+    disconnect(pc);
+    disconnect(fc);
 }
 
 // 重置数据
 void MainWindow3::on_pushButton_4_clicked()
 {
+    // 先断开帧回调：防止“扫描结束”已投递但尚未执行的队列 stop() 稍后 flush
+    // 尾包时发出的 newFrameAvailable 在 m_onlineOut 被清空后才到达 UI 线程
+    // （worldXYZ 悬空，读到垃圾坐标，导致下一次“开始扫描/加载数据”绘制大量缺帧，
+    //  再次重置后因没有在途 stop() 才恢复正常）。
+    disconnect(m_scan, &Scan::newFrameAvailable, this, &MainWindow3::renderFrame);
+
+    // 无论 UI 标志是否已置 false，都阻塞等待 Scan 线程完全停止：
+    // “扫描结束”走的是 QueuedConnection，stop() 可能仍在 Scan 线程队列中，
+    // 仅靠 m_isScanning 判断会漏停，让尾包在清空后到达。
+    QMetaObject::invokeMethod(m_scan, [this]() { m_scan->stop(); }, Qt::BlockingQueuedConnection);
+    m_isScanning = false;
+
     m_drawPaused = false;
+    // 扫描计时清零
+    m_scanElapsedMs = 0;
+    m_scanTimeRunning = false;
+    ui->pushButton_7->setText("开始扫描");
+    // 数据面板重置
+    if (m_dataPanel) m_dataPanel->reset();
+    // 点云/网格/相机重置
     resetPointCloud();
+    // Scan 侧状态完全重置（清空已加载文件、暂停/运行状态），
+    // 下次“开始扫描”会重新选择文件、从全新状态开始
+    QMetaObject::invokeMethod(m_scan, [this]() { m_scan->resetForNewScan(); }, Qt::BlockingQueuedConnection);
+
+    // 重新接回帧回调，进入全新状态
+    connect(m_scan, &Scan::newFrameAvailable, this, &MainWindow3::renderFrame);
+    m_isScanning = false;
+    m_drawPaused = false;
+    ui->pushButton_7->setText("开始扫描");
 }
 
 // 数据模式
@@ -1552,6 +1479,14 @@ void MainWindow3::on_pushButton_7_clicked()
     if (!m_isScanning) {
         // ===== 开始扫描 =====
 
+        // 与“开始绘制”保持一致：确保绘制管线已初始化并把数据帧接到渲染。
+        // （直接点“开始扫描”时若从未初始化过绘制，vboActor 为空会不绘制。）
+        if (!vboActor) {
+            initPointCloud();
+        }
+        disconnect(m_scan, &Scan::newFrameAvailable, this, &MainWindow3::renderFrame);
+        connect(m_scan, &Scan::newFrameAvailable, this, &MainWindow3::renderFrame);
+
         // 检查是否已加载数据
         if (!m_scan->isFileLoaded()) {
             // 选择CSV文件
@@ -1581,10 +1516,21 @@ void MainWindow3::on_pushButton_7_clicked()
 
     } else {
         // ===== 停止扫描 =====
-        QMetaObject::invokeMethod(m_scan, [this]() { m_scan->stop(); }, Qt::QueuedConnection);
+        // 按“暂停”处理（与“停止绘制”一致）：保留已绘制的点云和数据流位置，
+        // 这样 SoundScan 扫描暂停后点“扫描开始”时能继续绘制，而不是清空重来。
+        QMetaObject::invokeMethod(m_scan, [this]() { m_scan->pause(); }, Qt::QueuedConnection);
         m_isScanning = false;
-        m_drawPaused = false;
+        m_drawPaused = true;
         ui->pushButton_7->setText("开始扫描");
+
+        // 暂停时冻结扫描时间
+        if (m_scanTimeRunning) {
+            m_scanElapsedMs += m_scanTimer.elapsed();
+            m_scanTimeRunning = false;
+        }
+
+        // 联动 SoundScan：3DScan 停止扫描时同步触发超声扫描暂停
+        emit requestPauseScan();
 
         qDebug() << "Scan stopped";
     }
@@ -1638,6 +1584,13 @@ void MainWindow3::updateSurfaceMesh(int passIndex, bool forceTail)
     if (m_surfChunks.empty()) return;
     if (m_meshBuiltCount >= n && !forceTail) return;
     if (m_meshBuiltCount < 0) m_meshBuiltCount = 0;
+    // Per-tick point budget: bulk load feeds millions of points at once,
+    // so process the backlog in slices to keep the UI thread responsive.
+    // (Playback adds far fewer points per tick and is unaffected.)
+    const int kMeshTickBudget = 200000;
+    int end = n;
+    if ((n - m_meshBuiltCount) > kMeshTickBudget)
+        end = m_meshBuiltCount + kMeshTickBudget;
     SurfChunk* cur = &m_surfChunks.back();
     if (cur->cells->GetNumberOfCells() >= kChunkMaxCells)
         { newSurfaceChunk(); cur = &m_surfChunks.back(); }
@@ -1746,9 +1699,6 @@ void MainWindow3::updateSurfaceMesh(int passIndex, bool forceTail)
             m_surfGrid[0] = rowFilled;
             m_surfHasPrev = true;
             m_surfDataN = 0;
-            qDebug() << "SURF segment break at j=" << curJ
-                     << " prevJ=" << (m_surfHasPrev ? prevJ : -1)
-                     << " pass=" << (int)(curKey >> 32);
         } else {
             const std::unordered_map<int, SurfCell>& prev = m_surfPrevRow;
             int prevMin = prev.begin()->first, prevMax = prevMin;
@@ -1799,7 +1749,7 @@ void MainWindow3::updateSurfaceMesh(int passIndex, bool forceTail)
         m_surfDataRows.erase(rkey);
     };
 
-    for (int i = m_meshBuiltCount; i < n; i++) {
+    for (int i = m_meshBuiltCount; i < end; i++) {
         int kk = m_gridK[i], jj = m_gridJ[i];
         long long key = ((long long)kk << 32) | (unsigned int)(jj & 0xFFFFFFFFLL);
         m_meshIdx[key] = i;
@@ -1818,8 +1768,17 @@ void MainWindow3::updateSurfaceMesh(int passIndex, bool forceTail)
         for (auto& kv : m_surfRowCnt)
             if ((int)(kv.first >> 32) == m_meshCurBand) tail.push_back(kv.first);
         std::sort(tail.begin(), tail.end());
-        for (long long rkey : tail) buildRow(rkey);
-        m_meshBuiltCount = n;
+        const int kTailRowBudget = 4000;
+        int tailBuilt = 0;
+        for (long long rkey : tail) {
+            if (tailBuilt >= kTailRowBudget) break;
+            buildRow(rkey);
+            tailBuilt++;
+        }
+        if (tailBuilt >= (int)tail.size())
+            m_meshBuiltCount = end;
+        else
+            qDebug() << "SURF forceTail deferred rows:" << ((int)tail.size() - tailBuilt);
         if (cur->points) cur->points->Modified();
         if (cur->cells) cur->cells->Modified();
         if (cur->cellColors) cur->cellColors->Modified();
@@ -1831,7 +1790,7 @@ void MainWindow3::updateSurfaceMesh(int passIndex, bool forceTail)
 
     // Find where the new band starts inside this batch (per-point pass index).
     int switchI = m_meshBuiltCount;
-    while (switchI < n && m_surfPointPass[switchI] == m_meshCurBand) switchI++;
+    while (switchI < end && m_surfPointPass[switchI] == m_meshCurBand) switchI++;
 
     auto rowReady = [&](long long rkey) -> bool {
         auto itc = m_surfRowCnt.find(rkey);
@@ -1864,17 +1823,16 @@ void MainWindow3::updateSurfaceMesh(int passIndex, bool forceTail)
         m_surfPrevKey = -1;
         m_surfDataN = 0;
         m_meshCurBand = m_surfPointPass[switchI];
-        qDebug() << "SURF band switch to" << m_meshCurBand;
     }
 
     // Build the new band's completed rows.
-    for (int i = switchI; i < n; i++) {
+    for (int i = switchI; i < end; i++) {
         int jj = m_gridJ[i];
         long long rkey = ((long long)m_surfPointPass[i] << 32) | (unsigned int)(jj & 0xFFFFFFFFLL);
         if (!rowReady(rkey)) continue;
         buildRow(rkey);
     }
-    m_meshBuiltCount = n;
+    m_meshBuiltCount = end;
     if (cur->points) cur->points->Modified();
     if (cur->cells) cur->cells->Modified();
     if (cur->cellColors) cur->cellColors->Modified();
@@ -1897,4 +1855,3 @@ void MainWindow3::recolorSurfaceMesh()
         if (ch.mapper) ch.mapper->Modified();
     }
 }
-

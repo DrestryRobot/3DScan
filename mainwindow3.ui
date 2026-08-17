@@ -31,7 +31,7 @@
      <rect>
       <x>0</x>
       <y>0</y>
-      <width>801</width>
+      <width>2232</width>
       <height>631</height>
      </rect>
     </property>
@@ -58,7 +58,20 @@
       <number>0</number>
      </property>
      <item row="0" column="0" colspan="2">
-      <widget class="QWidget" name="colorBarWidget" native="true"/>
+      <widget class="QWidget" name="colorBarWidget" native="true">
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Fixed" vsizetype="Expanding">
+         <horstretch>0</horstretch>
+         <verstretch>0</verstretch>
+        </sizepolicy>
+       </property>
+       <property name="minimumSize">
+        <size>
+         <width>20</width>
+         <height>0</height>
+        </size>
+       </property>
+      </widget>
      </item>
      <item row="0" column="2">
       <widget class="QSplitter" name="mainSplitter">
@@ -73,7 +86,7 @@
        </property>
        <widget class="QVTKOpenGLNativeWidget" name="vtkWidget" native="true">
         <property name="sizePolicy">
-         <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+         <sizepolicy hsizetype="Preferred" vsizetype="Expanding">
           <horstretch>0</horstretch>
           <verstretch>0</verstretch>
          </sizepolicy>

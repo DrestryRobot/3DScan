@@ -89,7 +89,12 @@ public:
     void startDrawing();
     void pauseDrawing();
     void finishDrawing();
+    bool isDrawPaused() const { return m_drawPaused; }
     ~MainWindow3();
+
+signals:
+    // 3DScan 停止扫描时通知 SoundScan 同步暂停扫描
+    void requestPauseScan();
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event);
