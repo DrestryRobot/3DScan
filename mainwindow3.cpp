@@ -255,7 +255,7 @@ bool MainWindow3::eventFilter(QObject *obj, QEvent *event)
 void MainWindow3::initWidget()
 {
     // 自适应窗口
-    this->centralWidget()->setLayout(ui->gridLayout_2);
+    this->centralWidget()->setLayout(ui->horizontalLayout);
 
     // 绘制窗口与右侧面板之间加可拖动分隔线（水平方向），初始宽度比约 6:1
     if (ui->mainSplitter) {
