@@ -22,7 +22,7 @@
 //   < 0 : AMP/TOF is N frames FASTER than the pose (AMP/TOF is delayed by |N|)
 // Change this number and rebuild.
 // ============================================
-static const int kUsDelayFrames = -9;
+static const int kUsDelayFrames = -8;
 // 小噪点抑制：保留≥1mm 缺陷（约 ≥3 格），去除 0.3~0.6mm 孤立噪点。
 // 当前值偏离 3x3 局部中位数超过阈值且同向偏离的邻居 < kMinSupport 个时，判为孤立噪点压回背景。
 static const float kAmpNoiseDev = 0.08f;
