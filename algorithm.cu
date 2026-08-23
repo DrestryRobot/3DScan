@@ -14,9 +14,9 @@
 
 // ---------------------------------------------------------------------------
 // Kernel: transform beam points into world space and append them to the VBO.
-// Only valid points (amp != 0 && tof != 0) are written. A device counter is
-// used to compact valid writes into a contiguous cloud, so the accumulated
-// point cloud contains no gaps and no stale points.
+// Only valid points (amp != 0 && tof != 0) are written. Valid points are
+// compacted in input order. This ordering is important because the UI keeps
+// AMP/TOF values in the same order for later whole-cloud recoloring.
 // ---------------------------------------------------------------------------
 __global__ void transformPointsVBO_Kernel(
     const float* __restrict__ pose,
@@ -74,8 +74,13 @@ __global__ void transformPointsVBO_Kernel(
     float worldY = y3 + pose[1];
     float worldZ = z3 + pose[2];
 
-    // ---- compact append ----
-    int pos = startValid + atomicAdd(d_validCounter, 1);
+    // ---- stable compact append ----
+    // atomicAdd would make the output order depend on CUDA thread scheduling,
+    // breaking the AMP/TOF value-to-point correspondence during recoloring.
+    int stableOffset = 0;
+    for (int j = 0; j < idx; ++j)
+        if (amp[j] != 0.0f && tof[j] != 0.0f) ++stableOffset;
+    int pos = startValid + stableOffset;
     if (pos >= maxPoints) return;
 
     int outIdx = pos * 3;
@@ -220,7 +225,11 @@ __global__ void transformPointsVBatch_Kernel(
     float worldY = y3 + pose[1];
     float worldZ = z3 + pose[2];
 
-    int pos = startValid + atomicAdd(d_validCounter, 1);
+    // Keep the flattened frame/input order stable for later AMP/TOF recoloring.
+    int stableOffset = 0;
+    for (int j = 0; j < idx; ++j)
+        if (amps[j] != 0.0f && tofs[j] != 0.0f) ++stableOffset;
+    int pos = startValid + stableOffset;
     if (pos >= maxPoints) return;
 
     int outIdx = pos * 3;
@@ -274,7 +283,12 @@ __global__ void writeCloudPointsKernel(
     if (i >= count) return;
     if (amp[i] == 0.0f || tof[i] == 0.0f) return;
 
-    int pos = startValid + atomicAdd(d_validCounter, 1);
+    // Keep the input order stable so saved AMP/TOF values address the same
+    // point after a mode switch.
+    int stableOffset = 0;
+    for (int j = 0; j < i; ++j)
+        if (amp[j] != 0.0f && tof[j] != 0.0f) ++stableOffset;
+    int pos = startValid + stableOffset;
     if (pos >= maxPoints) return;
 
     int outIdx = pos * 3;
