@@ -56,6 +56,8 @@ static const uint32_t color_Amplitude[] = {
 MainWindow3::MainWindow3(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow3), m_scan(nullptr), m_isScanning(false), cudaProcessor(nullptr) {
     ui->setupUi(this);
+    ui->pushButton_8->setText(isAmpMode ? QStringLiteral("AMP模式") : QStringLiteral("TOF模式"));
+    ui->pushButton_12->setText(m_surfaceMode ? QStringLiteral("曲面模式") : QStringLiteral("点云模式"));
     // 统一界面字体大小为 14pt（与 SoundScan 其他窗口的 pt 字号一致）
     this->setStyleSheet(QStringLiteral("font-size: 14pt;"));
     qRegisterMetaType<ScanFrame>();
@@ -145,7 +147,11 @@ MainWindow3::MainWindow3(QWidget *parent)
     // 避免每40帧在渲染路径里同步重建网格造成周期性卡顿。
     m_surfaceMeshTimer = new QTimer(this);
     m_surfaceMeshTimer->setInterval(100);
-    connect(m_surfaceMeshTimer, &QTimer::timeout, this, [this]() { updateSurfaceMesh(m_lastPassIndex); });
+    connect(m_surfaceMeshTimer, &QTimer::timeout, this, [this]() {
+        updateSurfaceMesh(m_lastPassIndex, m_drawFinished && m_surfaceMode);
+        if (m_drawFinished && m_surfaceMode && m_meshBuiltCount >= (int)m_gridK.size())
+            m_surfaceMeshTimer->stop();
+    });
     m_surfaceMeshTimer->start();
 
     // 延迟注册 VBO (等待 OpenGL 上下文就绪)
@@ -157,6 +163,13 @@ void MainWindow3::autoStartDebug(const QString &csvPath) {
         qDebug() << "autoStartDebug: failed to load" << csvPath;
         return;
     }
+    m_drawFinished = false;
+    m_finishAtPauseSnapshot = false;
+    ui->pushButton->setEnabled(true);
+    if (m_overlayTimer && !m_overlayTimer->isActive())
+        m_overlayTimer->start();
+    if (m_surfaceMeshTimer && !m_surfaceMeshTimer->isActive())
+        m_surfaceMeshTimer->start();
     initPointCloud();
     disconnect(m_scan, &Scan::newFrameAvailable, this, &MainWindow3::renderFrame);
     connect(m_scan, &Scan::newFrameAvailable, this, &MainWindow3::renderFrame);
@@ -438,7 +451,9 @@ void MainWindow3::initPointCloud() {
     m_surfDataN = 0;
     m_meshCurBand = -1;
     m_surfRowLastSeen.clear();
-    m_surfaceMode = false;
+    m_surfaceMode = true;
+    ui->pushButton_8->setText(isAmpMode ? QStringLiteral("AMP模式") : QStringLiteral("TOF模式"));
+    ui->pushButton_12->setText(QStringLiteral("曲面模式"));
     m_interacting = false;
     m_lastPassIndex = 0;
     m_lastIpoc = 0;
@@ -471,7 +486,7 @@ void MainWindow3::initPointCloud() {
         vboActor = nullptr;
     }
     vboActor = vtkSmartPointer<vtkVBOActor>::New();
-    vboActor->VisibilityOn();
+    vboActor->VisibilityOff();
     renderer->AddActor(vboActor);
     m_surfChunks.clear();
     newSurfaceChunk();
@@ -842,16 +857,17 @@ void MainWindow3::resetPointCloud() {
     m_meshCurBand = -1;
     m_surfRowLastSeen.clear();
     m_interacting = false; // 交互状态卡住会阻止渲染定时器重绘，重置时一并复位
-    // 强制回到点云模式并恢复点云可见性：若上次停留在曲面模式，
-    // vboActor 仍处于隐藏状态，新扫描会"没有图像"。
-    m_surfaceMode = false;
+    // Reset the view to the default surface mode for the next workpiece.
+    m_surfaceMode = true;
+    ui->pushButton_8->setText(isAmpMode ? QStringLiteral("AMP模式") : QStringLiteral("TOF模式"));
+    ui->pushButton_12->setText(QStringLiteral("曲面模式"));
     for (auto &ch : m_surfChunks)
         if (ch.actor)
             ch.actor->VisibilityOff();
     m_surfChunks.clear();
     newSurfaceChunk();
     if (vboActor)
-        vboActor->VisibilityOn();
+        vboActor->VisibilityOff();
     if (cudaProcessor && vboRegistered) {
         resetVBO(cudaProcessor);
     }
@@ -875,6 +891,9 @@ void MainWindow3::resetPointCloud() {
 }
 
 void MainWindow3::renderFrame(const ScanFrame &frame) {
+    if (m_drawFinished && m_finishAtPauseSnapshot)
+        return;
+
     // 数据仍按 250Hz 全量累积进 VBO；实际重绘由限帧定时器统一触发（~30fps），
     // 避免每帧 Render() 造成渲染突发、队列积压和 GPU 利用率波动
     const bool renderNow = true;
@@ -912,6 +931,33 @@ void MainWindow3::updateOverlay() {
         m_dataPanel->setStatus(guiFrames, renderFps, scanTime, cloudValidPoints);
         m_dataPanel->setFrameInfo(m_lastIpoc, m_lastSi, m_lastBeam, m_lastPose, m_lastAmp0, m_lastTof0);
     }
+}
+
+void MainWindow3::finalizeFinishedDrawing() {
+    if (!m_drawFinished)
+        return;
+
+    // Scan::stop() flushes its tail before this queued callback runs, so the
+    // final frame events have already reached renderFrame().
+    if (m_finishAtPauseSnapshot) {
+        m_pendingCloud.clear();
+    } else {
+        flushPendingCloud();
+        updateSurfaceMesh(m_meshCurBand, true);
+    }
+    renderWindow->Render();
+
+    // Tail frames are drained while stopping, but no acquisition/render loop
+    // remains afterward. Report the terminal rates as zero.
+    m_guiFrames = 0;
+    m_renderCount = 0;
+    updateOverlay();
+
+    // Keep the last status and frame values visible until reset or a new workpiece.
+    if (m_overlayTimer)
+        m_overlayTimer->stop();
+    if (m_surfaceMeshTimer)
+        m_surfaceMeshTimer->stop();
 }
 
 void MainWindow3::onMouseClick(vtkObject *obj, unsigned long, void *clientData, void *) {
@@ -990,6 +1036,9 @@ void MainWindow3::GetColorFromValue(double value, unsigned char &r, unsigned cha
 
 // 开始绘制
 void MainWindow3::on_pushButton_clicked() {
+    if (m_drawFinished)
+        return;
+
     // 仅全新开始（未扫描且非暂停）时重置绘制数据；
     // 暂停后继续保留数据；已在扫描时不重置
     if (!vboActor) {
@@ -1008,12 +1057,16 @@ void MainWindow3::on_pushButton_clicked() {
         QMetaObject::invokeMethod(m_scan, [this]() { m_scan->start(); }, Qt::QueuedConnection);
         m_isScanning = true;
         ui->pushButton_7->setText("停止扫描");
-        qDebug() << "Scan started for rendering";
         // 扫描计时：全新开始清零，暂停后续扫不清零
         if (!m_drawPaused)
             m_scanElapsedMs = 0;
         m_scanTimer.restart();
         m_scanTimeRunning = true;
+        qDebug() << "Scan started for rendering";
+        if (m_overlayTimer && !m_overlayTimer->isActive())
+            m_overlayTimer->start();
+        if (m_surfaceMeshTimer && !m_surfaceMeshTimer->isActive())
+            m_surfaceMeshTimer->start();
     } else {
         qDebug() << "Drawing connected (scan already running)";
         if (!m_scanTimeRunning) {
@@ -1042,25 +1095,38 @@ void MainWindow3::on_pushButton_2_clicked() {
 
 // 结束绘制
 void MainWindow3::on_pushButton_3_clicked() {
-    if (m_isScanning) {
-        QMetaObject::invokeMethod(m_scan, [this]() { m_scan->stop(); }, Qt::QueuedConnection);
-        m_isScanning = false;
-        m_drawPaused = false;
-        ui->pushButton_7->setText("开始扫描");
-    }
+    if (m_drawFinished)
+        return;
+
+    m_drawFinished = true;
+    ui->pushButton->setEnabled(false);
+
+    const bool wasScanning = m_isScanning;
+    m_finishAtPauseSnapshot = m_drawPaused;
+    disconnect(m_scan, &Scan::newFrameAvailable, this, &MainWindow3::renderFrame);
+    m_isScanning = false;
+    m_drawPaused = false;
+    ui->pushButton_7->setText("开始扫描");
+
     // 结束绘制时停止计时
     if (m_scanTimeRunning) {
         m_scanElapsedMs += m_scanTimer.elapsed();
         m_scanTimeRunning = false;
     }
-    // 收尾剩余行，形成完整曲面
-    updateSurfaceMesh(m_meshCurBand, true);
-    renderWindow->Render();
-    QTimer::singleShot(800, this, [this]() {
-        updateSurfaceMesh(m_meshCurBand, true);
-        renderWindow->Render();
-    });
+    if (wasScanning)
+        emit requestPauseScan();
     qDebug() << "Drawing finished";
+
+    // Always serialize the stop and final render. This also handles ending
+    // while paused, where Scan::stop() does not emit finished().
+    QMetaObject::invokeMethod(
+        m_scan,
+        [this]() {
+            m_scan->stop();
+            connect(m_scan, &Scan::newFrameAvailable, this, &MainWindow3::renderFrame, Qt::QueuedConnection);
+            QMetaObject::invokeMethod(this, [this]() { finalizeFinishedDrawing(); }, Qt::QueuedConnection);
+        },
+        Qt::QueuedConnection);
 }
 
 // SoundScan 扫描控制链接入口
@@ -1171,16 +1237,26 @@ void MainWindow3::on_pushButton_6_clicked() {
     }
 
     // 先停掉正在进行的扫描/回放，避免与离线构建并发访问 Scan 状态
-    if (m_isScanning) {
-        QMetaObject::invokeMethod(m_scan, [this]() { m_scan->stop(); }, Qt::BlockingQueuedConnection);
-        m_isScanning = false;
-        m_drawPaused = false;
-        ui->pushButton_7->setText("开始扫描");
-        qDebug() << "Scan stopped before loading data";
-    }
+    disconnect(m_scan, &Scan::newFrameAvailable, this, &MainWindow3::renderFrame);
+    QMetaObject::invokeMethod(m_scan, [this]() { m_scan->stop(); }, Qt::BlockingQueuedConnection);
+    m_isScanning = false;
+    m_drawPaused = false;
+    ui->pushButton_7->setText("开始扫描");
+    qDebug() << "Scan stopped before loading data";
 
     // 与“开始绘制”相同的渲染起点
     initPointCloud();
+    m_drawFinished = false;
+    m_finishAtPauseSnapshot = false;
+    ui->pushButton->setEnabled(true);
+    m_scanElapsedMs = 0;
+    m_scanTimeRunning = false;
+    if (m_dataPanel)
+        m_dataPanel->reset();
+    if (m_overlayTimer && !m_overlayTimer->isActive())
+        m_overlayTimer->start();
+    if (m_surfaceMeshTimer && !m_surfaceMeshTimer->isActive())
+        m_surfaceMeshTimer->start();
 
     QProgressDialog progressDialog("正在加载数据...", "取消", 0, 100, this);
     progressDialog.setWindowTitle("加载进度");
@@ -1237,6 +1313,7 @@ void MainWindow3::on_pushButton_6_clicked() {
 
     disconnect(pc);
     disconnect(fc);
+    connect(m_scan, &Scan::newFrameAvailable, this, &MainWindow3::renderFrame);
 }
 
 // 重置数据
@@ -1254,10 +1331,13 @@ void MainWindow3::on_pushButton_4_clicked() {
     m_isScanning = false;
 
     m_drawPaused = false;
+    m_drawFinished = false;
+    m_finishAtPauseSnapshot = false;
     // 扫描计时清零
     m_scanElapsedMs = 0;
     m_scanTimeRunning = false;
     ui->pushButton_7->setText("开始扫描");
+    ui->pushButton->setEnabled(true);
     // 数据面板重置
     if (m_dataPanel)
         m_dataPanel->reset();
@@ -1272,10 +1352,16 @@ void MainWindow3::on_pushButton_4_clicked() {
     m_isScanning = false;
     m_drawPaused = false;
     ui->pushButton_7->setText("开始扫描");
+    if (m_overlayTimer && !m_overlayTimer->isActive())
+        m_overlayTimer->start();
+    if (m_surfaceMeshTimer && !m_surfaceMeshTimer->isActive())
+        m_surfaceMeshTimer->start();
 }
 
 // 数据模式
 void MainWindow3::on_pushButton_8_clicked() {
+    flushPendingCloud();
+
     // 先切换模式，保证点云(VBO)和曲面网格使用同一个新模式
     isAmpMode = !isAmpMode;
 
@@ -1296,7 +1382,7 @@ void MainWindow3::on_pushButton_8_clicked() {
     }
 
     recolorSurfaceMesh();
-    ui->pushButton_8->setText(isAmpMode ? "TOF\u6a21\u5f0f" : "AMP\u6a21\u5f0f");
+    ui->pushButton_8->setText(isAmpMode ? QStringLiteral("AMP模式") : QStringLiteral("TOF模式"));
 
     renderWindow->Render();
 }
@@ -1471,6 +1557,34 @@ void MainWindow3::on_pushButton_11_clicked() {
 // 开始扫描
 void MainWindow3::on_pushButton_7_clicked() {
     if (!m_isScanning) {
+        const bool startingNewWorkpiece = m_drawFinished;
+        if (startingNewWorkpiece) {
+            const QString filename =
+                QFileDialog::getOpenFileName(this, "选择新工件数据", "", "CSV Files (*.csv);;All Files (*)");
+            if (filename.isEmpty())
+                return;
+
+            disconnect(m_scan, &Scan::newFrameAvailable, this, &MainWindow3::renderFrame);
+            QMetaObject::invokeMethod(m_scan, [this]() { m_scan->resetForNewScan(); }, Qt::BlockingQueuedConnection);
+            if (!m_scan->loadCSVFile(filename)) {
+                connect(m_scan, &Scan::newFrameAvailable, this, &MainWindow3::renderFrame);
+                QMessageBox::warning(this, "错误", "新工件数据加载失败");
+                return;
+            }
+
+            initPointCloud();
+            if (m_dataPanel)
+                m_dataPanel->reset();
+            m_drawFinished = false;
+            m_finishAtPauseSnapshot = false;
+            ui->pushButton->setEnabled(true);
+            m_scanElapsedMs = 0;
+            if (m_overlayTimer && !m_overlayTimer->isActive())
+                m_overlayTimer->start();
+            if (m_surfaceMeshTimer && !m_surfaceMeshTimer->isActive())
+                m_surfaceMeshTimer->start();
+        }
+
         // ===== 开始扫描 =====
 
         // 与“开始绘制”保持一致：确保绘制管线已初始化并把数据帧接到渲染。
@@ -1501,8 +1615,16 @@ void MainWindow3::on_pushButton_7_clicked() {
         QMetaObject::invokeMethod(m_scan, [this]() { m_scan->start(); }, Qt::QueuedConnection);
         m_isScanning = true;
         ui->pushButton_7->setText("停止扫描");
-
         qDebug() << "Scan started";
+        if (!m_drawPaused)
+            m_scanElapsedMs = 0;
+        m_scanTimer.restart();
+        m_scanTimeRunning = true;
+        m_drawPaused = false;
+        if (m_overlayTimer && !m_overlayTimer->isActive())
+            m_overlayTimer->start();
+        if (m_surfaceMeshTimer && !m_surfaceMeshTimer->isActive())
+            m_surfaceMeshTimer->start();
 
     } else {
         // ===== 停止扫描 =====
@@ -1521,7 +1643,6 @@ void MainWindow3::on_pushButton_7_clicked() {
 
         // 联动 SoundScan：3DScan 停止扫描时同步触发超声扫描暂停
         emit requestPauseScan();
-
         qDebug() << "Scan stopped";
     }
 }
@@ -1530,20 +1651,24 @@ void MainWindow3::on_pushButton_7_clicked() {
 void MainWindow3::on_pushButton_12_clicked() {
     m_surfaceMode = !m_surfaceMode;
     if (m_surfaceMode) {
-        updateSurfaceMesh(m_meshCurBand);
+        updateSurfaceMesh(m_meshCurBand, true);
         if (vboActor)
             vboActor->VisibilityOff();
         for (auto &ch : m_surfChunks)
             if (ch.actor)
                 ch.actor->VisibilityOn();
-        ui->pushButton_12->setText(QStringLiteral("点云模式"));
+        ui->pushButton_12->setText(QStringLiteral("曲面模式"));
+        if (m_drawFinished && m_meshBuiltCount < (int)m_gridK.size() && m_surfaceMeshTimer)
+            m_surfaceMeshTimer->start();
     } else {
         if (vboActor)
             vboActor->VisibilityOn();
         for (auto &ch : m_surfChunks)
             if (ch.actor)
                 ch.actor->VisibilityOff();
-        ui->pushButton_12->setText(QStringLiteral("曲面模式"));
+        ui->pushButton_12->setText(QStringLiteral("点云模式"));
+        if (m_drawFinished && m_surfaceMeshTimer)
+            m_surfaceMeshTimer->stop();
     }
     renderWindow->Render();
 }

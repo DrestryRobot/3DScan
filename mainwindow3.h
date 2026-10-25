@@ -150,7 +150,7 @@ private:
     std::vector<double> m_frameLY;
     std::vector<int> m_frameCount;
     std::vector<float> m_cloudXYZ;
-    bool m_surfaceMode = false;
+    bool m_surfaceMode = true;
     struct SurfChunk {
         vtkSmartPointer<vtkPolyData> poly;
         vtkSmartPointer<vtkPolyDataMapper> mapper;
@@ -197,6 +197,8 @@ private:
     // 状态
     bool m_isScanning;
     bool m_drawPaused = false;
+    bool m_drawFinished = false;
+    bool m_finishAtPauseSnapshot = false;
     int m_totalFrames;
 
     static const int MAX_POINTS = 10000000; // 最大支持100000
@@ -301,6 +303,7 @@ private:
     void GetColorFromValue(double value, unsigned char &r, unsigned char &g, unsigned char &b);
     void renderFrame(const ScanFrame &frame);
     void updateOverlay();
+    void finalizeFinishedDrawing();
     void registerVBOWithCUDA();
     void resetPointCloud();
     void updateSurfaceMesh(int passIndex, bool forceTail = false);
