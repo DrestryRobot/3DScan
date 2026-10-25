@@ -1,28 +1,29 @@
 #include "mainwindow3.h"
+
 #include <QApplication>
-#include <QTimer>
+#include <QDateTime>
 #include <QDebug>
 #include <QFile>
-#include <QTextStream>
 #include <QMutex>
-#include <QDateTime>
+#include <QTextStream>
+#include <QTimer>
 
 static QMutex g_logMutex;
-static void logToFile(QtMsgType type, const QMessageLogContext&, const QString& msg)
-{
+static void logToFile(QtMsgType type, const QMessageLogContext &, const QString &msg) {
     QMutexLocker locker(&g_logMutex);
     QFile f("C:/3dscan/debug.log");
     if (f.open(QIODevice::Append | QIODevice::Text)) {
         QTextStream ts(&f);
         ts << QDateTime::currentDateTime().toString("HH:mm:ss.zzz") << " "
-           << (type == QtDebugMsg ? "D" : type == QtWarningMsg ? "W" : "E")
+           << (type == QtDebugMsg     ? "D"
+               : type == QtWarningMsg ? "W"
+                                      : "E")
            << " " << msg << "\n";
     }
     fprintf(stderr, "%s\n", msg.toUtf8().constData());
 }
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
     qInstallMessageHandler(logToFile);
 
     QApplication a(argc, argv);
@@ -34,9 +35,7 @@ int main(int argc, char *argv[])
 
     if (argc > 1) {
         const QString csv = QString::fromLocal8Bit(argv[1]);
-        QTimer::singleShot(800, &w, [&w, csv]() {
-            w.autoStartDebug(csv);
-        });
+        QTimer::singleShot(800, &w, [&w, csv]() { w.autoStartDebug(csv); });
     }
 
     return a.exec();

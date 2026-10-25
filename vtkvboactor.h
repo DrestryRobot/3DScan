@@ -1,39 +1,34 @@
 #ifndef VTK_VBO_ACTOR_H
 #define VTK_VBO_ACTOR_H
 
-#include <vtkActor.h>
-#include <vtkObjectFactory.h>
+#include <QOpenGLFunctions>
 #include <QOpenGLFunctions_3_3_Core>
 #include <QOpenGLVersionFunctionsFactory>
-#include <QOpenGLFunctions>
+#include <vtkActor.h>
+#include <vtkObjectFactory.h>
 
 // CUDA接口
 #include "algorithm.h"
 
-class vtkVBOActor : public vtkActor
-{
+class vtkVBOActor : public vtkActor {
 public:
-    static vtkVBOActor* New();
+    static vtkVBOActor *New();
     vtkTypeMacro(vtkVBOActor, vtkActor);
 
     void SetCUDAProcessor(CUDAProcessorHandle handle) { cudaHandle = handle; }
     void SetVBOInitialized(bool initialized) { vboInitialized = initialized; }
     void SetValidPointCount(int count) { validPointCount = count; }
     // 显示抽稀步长：只绘制下标为 stride 倍数的点，用于大点云下保持渲染帧率
-    void SetDisplayStride(int stride)
-    {
-        displayStride = (stride > 1) ? stride : 1;
-    }
-    void SetVBOIDs(unsigned int pointsID, unsigned int colorsID)
-    {
+    void SetDisplayStride(int stride) { displayStride = (stride > 1) ? stride : 1; }
+    void SetVBOIDs(unsigned int pointsID, unsigned int colorsID) {
         vboPointsID = pointsID;
         vboColorsID = colorsID;
     }
 
-    void Render(vtkRenderer* renderer, vtkMapper* mapper) override;
+    void Render(vtkRenderer *renderer, vtkMapper *mapper) override;
     void SetCloudBounds(double xmin, double xmax, double ymin, double ymax, double zmin, double zmax);
-    double* GetBounds() override;
-    int RenderOpaqueGeometry(vtkViewport* viewport) override;
+    double *GetBounds() override;
+    int RenderOpaqueGeometry(vtkViewport *viewport) override;
 
 protected:
     vtkVBOActor();
@@ -51,7 +46,7 @@ private:
     unsigned int vboColorsID = 0;
 
     // OpenGL 3.3 核心函数
-    QOpenGLFunctions_3_3_Core* gl = nullptr;
+    QOpenGLFunctions_3_3_Core *gl = nullptr;
     bool glInitialized = false;
 
     // 着色器
@@ -72,9 +67,9 @@ private:
     unsigned int vao = 0;
     // 索引绘制（显示抽稀时只提交 1/stride 的顶点，GPU 不再全量处理）
     unsigned int m_indexVBO = 0;
-    int m_indexCapacity = 0;     // 索引缓冲容量（按 2 的幂增长，避免每帧重建）
-    int m_indexStride = -1;      // 上次构建索引时的 stride
-    int m_indexCount = 0;        // 本次实际绘制的索引数
+    int m_indexCapacity = 0; // 索引缓冲容量（按 2 的幂增长，避免每帧重建）
+    int m_indexStride = -1;  // 上次构建索引时的 stride
+    int m_indexCount = 0;    // 本次实际绘制的索引数
 
     bool initGL();
     bool initShaderAndVAO();

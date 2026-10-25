@@ -15,8 +15,8 @@
 //      - mainwindow3.cpp 第 885~892 行附近的本地 amp/tof/longmen 定义
 // ============================================================
 
-#include <QtGlobal>
 #include <QMutex>
+#include <QtGlobal>
 
 // 跨线程共享的扫描数据全局量（机器人位姿/IPOC、超声 AMP/TOF/SI/beamValid、
 // 龙门位置）由 udpserver / ads_poller / viewmodel 三个线程实时写入，而

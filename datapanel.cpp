@@ -5,14 +5,12 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
-DataPanel::DataPanel(QWidget *host)
-    : QFrame(host)
-{
+DataPanel::DataPanel(QWidget *host) : QFrame(host) {
     setObjectName("dataPanel");
 
     // 统一排版参数：数据行铺满整个面板，行高/行距统一，随上下分隔线整体缩放
-    const int kRowSpacing = 4;    // 数据项行距
-    const int kColSpacing = 15;   // 键值列间距
+    const int kRowSpacing = 4;  // 数据项行距
+    const int kColSpacing = 15; // 键值列间距
 
     QVBoxLayout *root = new QVBoxLayout(this);
     root->setContentsMargins(12, 8, 12, 8);
@@ -24,7 +22,7 @@ DataPanel::DataPanel(QWidget *host)
         if (role) {
             label->setProperty(role, true);
             if (qstrcmp(role, "sectionTitle") == 0)
-                label->setAlignment(Qt::AlignCenter);   // 模块标题居中
+                label->setAlignment(Qt::AlignCenter); // 模块标题居中
         }
         return label;
     };
@@ -80,38 +78,36 @@ DataPanel::DataPanel(QWidget *host)
 
     reset();
 
-    setStyleSheet(
-        "QFrame#dataPanel {"
-        "  background-color: rgba(18, 24, 38, 220);"
-        "  border: 1px solid #2a4a72;"
-        "  border-radius: 4px;"
-        "}"
-        "QFrame#dataPanel QLabel {"
-        "  color: rgb(230, 235, 240);"
-        "  font-size: 14pt;"
-        "  background: transparent;"
-        "  padding: 0px;"
-        "}"
-        "QFrame#dataPanel QLabel[sectionTitle=\"true\"] {"
-        "  color: #8ec5ff;"
-        "  font-size: 13pt;"
-        "  font-weight: bold;"
-        "  padding-bottom: 1px;"
-        "}"
-        "QFrame#dataPanel QLabel[key=\"true\"] {"
-        "  color: rgba(180, 195, 215, 170);"
-        "}"
-        "QFrame#dataPanel QLabel[value=\"true\"] {"
-        "  font-family: \"Consolas\";"
-        "}"
-        "QFrame#dataPanel QFrame[separator=\"true\"] {"
-        "  background-color: rgba(90, 138, 191, 90);"
-        "  border: none;"
-        "}");
+    setStyleSheet("QFrame#dataPanel {"
+                  "  background-color: rgba(18, 24, 38, 220);"
+                  "  border: 1px solid #2a4a72;"
+                  "  border-radius: 4px;"
+                  "}"
+                  "QFrame#dataPanel QLabel {"
+                  "  color: rgb(230, 235, 240);"
+                  "  font-size: 14pt;"
+                  "  background: transparent;"
+                  "  padding: 0px;"
+                  "}"
+                  "QFrame#dataPanel QLabel[sectionTitle=\"true\"] {"
+                  "  color: #8ec5ff;"
+                  "  font-size: 13pt;"
+                  "  font-weight: bold;"
+                  "  padding-bottom: 1px;"
+                  "}"
+                  "QFrame#dataPanel QLabel[key=\"true\"] {"
+                  "  color: rgba(180, 195, 215, 170);"
+                  "}"
+                  "QFrame#dataPanel QLabel[value=\"true\"] {"
+                  "  font-family: \"Consolas\";"
+                  "}"
+                  "QFrame#dataPanel QFrame[separator=\"true\"] {"
+                  "  background-color: rgba(90, 138, 191, 90);"
+                  "  border: none;"
+                  "}");
 }
 
-void DataPanel::anchorTo(QWidget *ref, int margin)
-{
+void DataPanel::anchorTo(QWidget *ref, int margin) {
     if (!ref)
         return;
     QWidget *host = parentWidget();
@@ -124,41 +120,30 @@ void DataPanel::anchorTo(QWidget *ref, int margin)
     show();
 }
 
-void DataPanel::setStatus(int dataFps, int renderFps, const QString &scanTime, int pointCount)
-{
+void DataPanel::setStatus(int dataFps, int renderFps, const QString &scanTime, int pointCount) {
     m_lblDataFps->setText(QString("%1 fps").arg(dataFps, 4));
     m_lblRenderFps->setText(QString("%1 fps").arg(renderFps, 4));
     m_lblScanTime->setText(scanTime);
     m_lblPointCount->setText(QString("%1").arg(pointCount, 8));
 }
 
-void DataPanel::setFrameInfo(quint32 ipoc, double si, int beam,
-                             const double pose[6], double amp0, double tof0)
-{
+void DataPanel::setFrameInfo(quint32 ipoc, double si, int beam, const double pose[6], double amp0, double tof0) {
     m_lblFrame->setText(QString("%1").arg(ipoc, 8));
     m_lblSi->setText(QString("%1").arg(si, 8, 'f', 2));
     m_lblBeam->setText(QString("%1").arg(beam, 4));
-    m_lblPose->setText(QString("%1 %2 %3")
-                           .arg(pose[0], 5, 'f', 0)
-                           .arg(pose[1], 5, 'f', 0)
-                           .arg(pose[2], 5, 'f', 0));
-    m_lblAngle->setText(QString("%1 %2 %3")
-                           .arg(pose[3], 5, 'f', 0)
-                           .arg(pose[4], 5, 'f', 0)
-                           .arg(pose[5], 5, 'f', 0));
+    m_lblPose->setText(QString("%1 %2 %3").arg(pose[0], 5, 'f', 0).arg(pose[1], 5, 'f', 0).arg(pose[2], 5, 'f', 0));
+    m_lblAngle->setText(QString("%1 %2 %3").arg(pose[3], 5, 'f', 0).arg(pose[4], 5, 'f', 0).arg(pose[5], 5, 'f', 0));
     m_lblAmp0->setText(QString("%1").arg(amp0, 8, 'f', 2));
     m_lblTof0->setText(QString("%1").arg(tof0, 8, 'f', 2));
 }
 
-void DataPanel::setMeasure(double amp, double tof, double distance)
-{
+void DataPanel::setMeasure(double amp, double tof, double distance) {
     m_lblAmp->setText(QString("%1").arg(amp, 8, 'f', 3));
     m_lblTof->setText(QString("%1").arg(tof, 8, 'f', 3));
     m_lblDist->setText(QString("%1").arg(distance, 8, 'f', 3));
 }
 
-void DataPanel::reset()
-{
+void DataPanel::reset() {
     const double zero[6] = {0, 0, 0, 0, 0, 0};
     setStatus(0, 0, "00:00:00", 0);
     setFrameInfo(0, 0.0, 0, zero, 0.0, 0.0);

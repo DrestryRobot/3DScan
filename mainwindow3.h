@@ -1,75 +1,61 @@
 #ifndef MAINWINDOW3_H
 #define MAINWINDOW3_H
 
-#include <QMainWindow>
-
-#include <vtkRenderer.h>
-#include <vtkRenderWindow.h>
-#include <vtkRenderWindowInteractor.h>
-#include <vtkInteractorStyleTrackballCamera.h>
-#include <vtkCamera.h>
-#include <vtkLightKit.h>
-
-#include <vtkPSphereSource.h>
-#include <vtkActor.h>
-#include <vtkPolyDataMapper.h>
-#include <vtkProperty.h>
-
-#include <vtkAxesActor.h>
-#include <vtkCaptionActor2D.h>
-#include <vtkTextProperty.h>
-
-#include <vtkTransform.h>
-#include <vtkGlyph3D.h>
-#include <vtkUnsignedCharArray.h>
-#include <vtkPointData.h>
-#include <vtkCellData.h>
-#include <vtkFloatArray.h>
-#include <vtkPoints.h>
-#include <vtkCellArray.h>
-#include <vtkPolyData.h>
-#include <array>
-#include <deque>
-#include <vector>
-#include <unordered_map>
-#include <unordered_set>
-
-#include <QFileDialog>
-#include <QMessageBox>
-
-#include <QString>
-
-#include <vtkPlaneSource.h>
-
-#include <vtkPointPicker.h>
-#include <vtkCallbackCommand.h>
-
-#include <vtkPNGWriter.h>
-#include <vtkWindowToImageFilter.h>
-
-#include <vtkKdTree.h>
-#include <vtkPropPicker.h>
-
-#include <QProgressDialog>
-#include <QPainter>
-
-#include <vtkOpenGLPolyDataMapper.h>
-
+#include "algorithm.h"
 #include "scan.h"
+#include "vtkvboactor.h"
+
+#include <array>
+#include <cuda_runtime.h>
+#include <deque>
+#include <QElapsedTimer>
+#include <QFileDialog>
+#include <QFrame>
+#include <QLabel>
+#include <QMainWindow>
+#include <QMessageBox>
+#include <QOpenGLBuffer>
+#include <QPainter>
+#include <QProgressDialog>
+#include <QString>
 #include <QThread>
 #include <QTimer>
-#include <QElapsedTimer>
-#include <QLabel>
-#include <QFrame>
-
-#include <vtkPointGaussianMapper.h>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+#include <vtkActor.h>
 #include <vtkAppendPolyData.h>
-
-#include "algorithm.h"
-#include "vtkVBOActor.h"
-#include <QOpenGLBuffer>
-#include <cuda_runtime.h>
+#include <vtkAxesActor.h>
+#include <vtkCallbackCommand.h>
+#include <vtkCamera.h>
+#include <vtkCaptionActor2D.h>
+#include <vtkCellArray.h>
+#include <vtkCellData.h>
+#include <vtkFloatArray.h>
+#include <vtkGlyph3D.h>
+#include <vtkInteractorStyleTrackballCamera.h>
+#include <vtkKdTree.h>
+#include <vtkLightKit.h>
+#include <vtkOpenGLPolyDataMapper.h>
+#include <vtkPlaneSource.h>
+#include <vtkPNGWriter.h>
+#include <vtkPointData.h>
+#include <vtkPointGaussianMapper.h>
+#include <vtkPointPicker.h>
+#include <vtkPoints.h>
+#include <vtkPolyData.h>
+#include <vtkPolyDataMapper.h>
+#include <vtkProperty.h>
+#include <vtkPropPicker.h>
+#include <vtkPSphereSource.h>
+#include <vtkRenderer.h>
 #include <vtkRendererCollection.h>
+#include <vtkRenderWindow.h>
+#include <vtkRenderWindowInteractor.h>
+#include <vtkTextProperty.h>
+#include <vtkTransform.h>
+#include <vtkUnsignedCharArray.h>
+#include <vtkWindowToImageFilter.h>
 
 class DataPanel;
 
@@ -79,13 +65,12 @@ class MainWindow3;
 }
 QT_END_NAMESPACE
 
-class MainWindow3 : public QMainWindow
-{
+class MainWindow3 : public QMainWindow {
     Q_OBJECT
 
 public:
     MainWindow3(QWidget *parent = nullptr);
-    void autoStartDebug(const QString& csvPath);
+    void autoStartDebug(const QString &csvPath);
     void startDrawing();
     void pauseDrawing();
     void finishDrawing();
@@ -100,27 +85,27 @@ protected:
     bool eventFilter(QObject *obj, QEvent *event);
 
 private slots:
-    void on_pushButton_clicked();    // 开始绘制
+    void on_pushButton_clicked(); // 开始绘制
 
-    void on_pushButton_2_clicked();  // 停止绘制
+    void on_pushButton_2_clicked(); // 停止绘制
 
-    void on_pushButton_3_clicked();  // 结束绘制
+    void on_pushButton_3_clicked(); // 结束绘制
 
-    void on_pushButton_5_clicked();  // 保存数据
+    void on_pushButton_5_clicked(); // 保存数据
 
-    void on_pushButton_6_clicked();  // 加载数据
+    void on_pushButton_6_clicked(); // 加载数据
 
-    void on_pushButton_4_clicked();  // 重置数据
+    void on_pushButton_4_clicked(); // 重置数据
 
-    void on_pushButton_8_clicked();  // 数据模式
+    void on_pushButton_8_clicked(); // 数据模式
 
     void on_pushButton_10_clicked(); // 数据测量
 
-    void on_pushButton_9_clicked();  // 对齐视点
+    void on_pushButton_9_clicked(); // 对齐视点
 
     void on_pushButton_11_clicked(); // 窗口截图
 
-    void on_pushButton_7_clicked();  // 开始扫描
+    void on_pushButton_7_clicked(); // 开始扫描
 
     void on_pushButton_12_clicked(); // 点云模式
 
@@ -145,8 +130,7 @@ private:
     vtkSmartPointer<vtkActor> point1Actor;
     vtkSmartPointer<vtkActor> point2Actor;
     // ============ 侧边浮动数据面板（独立文件 datapanel.h/cpp，便于扩展） ============
-    DataPanel* m_dataPanel = nullptr;
-
+    DataPanel *m_dataPanel = nullptr;
 
     // 显示模式
     bool isCloudMode = true;
@@ -158,7 +142,7 @@ private:
     std::vector<int> m_gridK;
     std::vector<int> m_gridJ;
     std::vector<int> m_surfPointPass;
-    int m_displayStride = 1;   // 点云显示抽稀步长（2 的幂，只增不减）
+    int m_displayStride = 1; // 点云显示抽稀步长（2 的幂，只增不减）
     std::vector<std::array<double, 6>> m_framePose;
     std::vector<double> m_frameSi;
     std::vector<int> m_frameBeam;
@@ -183,13 +167,15 @@ private:
     std::vector<std::array<int, 4>> m_meshQuadVerts;
     std::unordered_map<long long, int> m_meshVertIdx;
     std::unordered_set<long long> m_meshPatchDone;
-    struct SurfCell { float x = 0, y = 0, z = 0, a = 0, t = 0; };
+    struct SurfCell {
+        float x = 0, y = 0, z = 0, a = 0, t = 0;
+    };
     std::unordered_map<long long, int> m_surfRowCnt;
     std::unordered_set<long long> m_surfRowDone;
     std::unordered_map<long long, std::unordered_map<int, SurfCell>> m_surfDataRows;
     std::unordered_map<int, SurfCell> m_surfPrevRow;
     bool m_surfHasPrev = false;
-    long long m_surfPrevKey = -1;   // 上一条已构建行 rkey = (pass<<32)|j
+    long long m_surfPrevKey = -1; // 上一条已构建行 rkey = (pass<<32)|j
     int m_surfLastDataJ = 0;
     int m_surfLastDir = 0;
     bool m_surfDirInit = false;
@@ -206,7 +192,7 @@ private:
     bool hasLastPoint = false;
 
     // 扫描相关
-    Scan* m_scan;
+    Scan *m_scan;
     QThread m_scanThread;
     // 状态
     bool m_isScanning;
@@ -226,13 +212,13 @@ private:
     qint64 m_lastInteractionMs = 0;
     double cameraFitMin[3] = {0, 0, 0};
     double cameraFitMax[3] = {0, 0, 0};
-    static const int MAX_POINTS_PER_FRAME = 10000000;  // 添加这行
+    static const int MAX_POINTS_PER_FRAME = 10000000; // 添加这行
 
     bool vboRegistered = false;
 
     // ============ 自定义 VBO (OpenGL) ============
-    QOpenGLBuffer* vboPoints = nullptr;   // 顶点位置 VBO
-    QOpenGLBuffer* vboColors = nullptr;   // 顶点颜色 VBO
+    QOpenGLBuffer *vboPoints = nullptr; // 顶点位置 VBO
+    QOpenGLBuffer *vboColors = nullptr; // 顶点颜色 VBO
     int vboMaxPoints = 0;
     bool vboInitialized = false;
 
@@ -240,12 +226,12 @@ private:
     int currentValidPoints = 0;
 
     // 左上角叠加层：数据帧率 / 渲染帧率 / 扫描时间 / 点云点数
-    QTimer* m_overlayTimer = nullptr;
+    QTimer *m_overlayTimer = nullptr;
     // 限帧渲染定时器：数据按 250Hz 累积进 VBO，重绘由该定时器统一触发（~30fps）
-    QTimer* m_renderTimer = nullptr;
-    bool m_renderRequested = false;    // 有点云数据更新待重绘
-    bool m_interacting = false;        // 用户正在拖拽/旋转视角（交互器独占渲染）
-    QElapsedTimer m_cameraFitTimer;    // ResetCamera 节流（避免频繁重置取景造成卡顿）
+    QTimer *m_renderTimer = nullptr;
+    bool m_renderRequested = false; // 有点云数据更新待重绘
+    bool m_interacting = false;     // 用户正在拖拽/旋转视角（交互器独占渲染）
+    QElapsedTimer m_cameraFitTimer; // ResetCamera 节流（避免频繁重置取景造成卡顿）
     bool m_cameraFitTimerValid = false;
     // 渲染耗时统计（限频日志，用于定位 CPU 瓶颈）
     int m_timingFlushMs = 0;
@@ -256,16 +242,16 @@ private:
     qint64 m_timingTickGapMs = 0;
     QElapsedTimer m_timingTickTimer;
     bool m_timingTickTimerValid = false;
-    int m_timingGapSlowCount = 0;     // 间隔 >80ms 的 tick 数（判断是否被饿死）
-    QTimer* m_idleProbeTimer = nullptr;
+    int m_timingGapSlowCount = 0; // 间隔 >80ms 的 tick 数（判断是否被饿死）
+    QTimer *m_idleProbeTimer = nullptr;
     int m_idleProbeCount = 0;
-    int m_vtkPaintCount = 0;          // vtkWidget 每秒 Paint 事件数（确认重绘频率）
+    int m_vtkPaintCount = 0; // vtkWidget 每秒 Paint 事件数（确认重绘频率）
     QElapsedTimer m_idleGapTimer;
     bool m_idleGapValid = false;
-    qint64 m_idleMaxGapMs = 0;        // 1ms 探针之间的最长间隔（≈UI 线程最长单事件耗时）
+    qint64 m_idleMaxGapMs = 0; // 1ms 探针之间的最长间隔（≈UI 线程最长单事件耗时）
     bool m_vtkSizeLogged = false;
     // 曲面网格空闲重建定时器（去掉每40帧的周期性卡顿）
-    QTimer* m_surfaceMeshTimer = nullptr;
+    QTimer *m_surfaceMeshTimer = nullptr;
     int m_lastPassIndex = 0;
     int m_guiFrames = 0;
     int m_renderCount = 0;
@@ -305,10 +291,13 @@ private:
     void initDataPanel();  // 初始化侧边浮动数据面板
     void initVTK();        // 初始化VTK
     void initPointCloud(); // 初始化点云
-    void AddPointCloud(const double pose[], const double amp[], const double tof[], double si, int beam, bool renderNow = true, const double* beamZ = nullptr, const float* worldXYZ = nullptr, int worldCount = 0, const int* gridK = nullptr, const int* gridJ = nullptr, int passIndex = 0, double lx = 0, double ly = 0);
+    void AddPointCloud(const double pose[], const double amp[], const double tof[], double si, int beam,
+                       bool renderNow = true, const double *beamZ = nullptr, const float *worldXYZ = nullptr,
+                       int worldCount = 0, const int *gridK = nullptr, const int *gridJ = nullptr, int passIndex = 0,
+                       double lx = 0, double ly = 0);
     void flushPendingCloud();
     static void onMouseClick(vtkObject *obj, unsigned long event, void *clientData, void *callData); // 鼠标点击
-    void pickPoint(int x, int y);   // 测量点
+    void pickPoint(int x, int y);                                                                    // 测量点
     void GetColorFromValue(double value, unsigned char &r, unsigned char &g, unsigned char &b);
     void renderFrame(const ScanFrame &frame);
     void updateOverlay();

@@ -8,8 +8,7 @@ class QLabel;
 
 // 侧边浮动数据面板：统一显示 状态 / 最新帧 / 测量 三部分数据。
 // 后续需要扩展字段时，直接在此类中增加标签与对应的 setter 即可。
-class DataPanel : public QFrame
-{
+class DataPanel : public QFrame {
     Q_OBJECT
 
 public:
@@ -22,8 +21,7 @@ public:
     void setStatus(int dataFps, int renderFps, const QString &scanTime, int pointCount);
 
     // 最新帧区：Frame / SI / Beam / Pose(6) / AMP[0] / TOF[0]
-    void setFrameInfo(quint32 ipoc, double si, int beam,
-                      const double pose[6], double amp0, double tof0);
+    void setFrameInfo(quint32 ipoc, double si, int beam, const double pose[6], double amp0, double tof0);
 
     // 测量区：AMP / TOF / Distance
     void setMeasure(double amp, double tof, double distance);
