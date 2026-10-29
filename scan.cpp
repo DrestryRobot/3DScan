@@ -1145,7 +1145,6 @@ void Scan::sendNextFrame() {
     // 实时模式：全局量由 udpserver（机器人 250Hz/IPOC）和 ViewModel（超声 180Hz）
     // 实时写入。以机器人 IPOC 为硬件时间戳：IPOC 未变化就跳过本 tick。
     if (!m_dataStream.is_open()) {
-        quint64 nowMs = (quint64)QDateTime::currentMSecsSinceEpoch();
         // 软暂停：等待机器人 IPOC 停稳后再真正停止。停稳之前照常处理
         // 每一帧（滑行段也画点），保证暂停点附近不缺帧。
         if (m_pausePending) {
@@ -1179,15 +1178,6 @@ void Scan::sendNextFrame() {
             }
         }
         if (robot_ipoc == m_lastIpoc) {
-            // 停滞检测：实时扫描中 IPOC 长时间不变化，说明机器人数据被阻塞/卡死
-            if (m_lastIpocChangeMs != 0 && nowMs - m_lastIpocChangeMs > 500) {
-                static quint64 lastStallWarnMs = 0;
-                if (nowMs - lastStallWarnMs >= 1000) {
-                    lastStallWarnMs = nowMs;
-                    qDebug() << "[Scan] IPOC停滞警告: 已" << (nowMs - m_lastIpocChangeMs)
-                             << "ms 未变化, robot_ipoc=" << robot_ipoc;
-                }
-            }
             return;
         }
         // IPOC 增量驱动：每一帧机器人（250Hz）都处理，超声读取最近一次
@@ -1195,16 +1185,8 @@ void Scan::sendNextFrame() {
         quint32 ipocDelta = robot_ipoc - m_lastIpoc; // 无符号差，处理回绕
         if (ipocDelta > 4) {
             m_lostFrames += ipocDelta / 4 - 1;
-            static quint64 lastMissWarnMs = 0;
-            if (nowMs - lastMissWarnMs >= 1000) {
-                lastMissWarnMs = nowMs;
-                qDebug() << "[Scan] 实时缺帧: 上次IPOC" << m_lastIpoc << " 当前" << robot_ipoc << " 跳过"
-                         << (ipocDelta / 4 - 1) << "帧"
-                         << " 累计" << m_lostFrames << "帧";
-            }
         }
         m_lastIpoc = robot_ipoc;
-        m_lastIpocChangeMs = nowMs;
     }
     computeBeamDepthOnline();
     m_currentIndex++;

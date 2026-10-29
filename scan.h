@@ -202,7 +202,6 @@ private:
     std::deque<double> m_uHist, m_sHist, m_zHist;
     // 实时模式：以上一帧 IPOC 判断是否有新的硬件帧（机器人 4ms/250Hz）
     quint32 m_lastIpoc = 0;
-    quint64 m_lastIpocChangeMs = 0; // 最近一次 IPOC 变化的时间（停滞检测用）
     int m_passDir = 0;
     int m_passFrames = 0;
     double m_passUsum = 0;
